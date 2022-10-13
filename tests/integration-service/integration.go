@@ -1,10 +1,7 @@
 package integration
 
 import (
-	//	"bytes"
-	//	"context"
 	"fmt"
-	//	"net/http"
 	"strings"
 	"time"
 
@@ -15,8 +12,7 @@ import (
 	"github.com/redhat-appstudio/e2e-tests/pkg/utils"
 	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
 
-	//	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	//appstudioshared "github.com/redhat-appstudio/managed-gitops/appstudio-shared/apis/appstudio.redhat.com/v1alpha1"
+	appstudioshared "github.com/redhat-appstudio/managed-gitops/appstudio-shared/apis/appstudio.redhat.com/v1alpha1"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -24,13 +20,14 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	klog "k8s.io/klog/v2"
-	//	routev1 "github.com/openshift/api/route/v1"
 )
 
 const (
 	containerImageSource = "quay.io/redhat-appstudio-qe/busybox-loop:latest"
 	gitSourceRepoName    = "devfile-sample-python-basic"
 	gitSourceURL         = "https://github.com/redhat-appstudio-qe/" + gitSourceRepoName
+	bundleURL      = "quay.io/kpavic/test-bundle:build-pipeline-pass"
+	inPipelineName = "component-pipeline-pass"
 )
 
 var _ = framework.IntegrationServiceSuiteDescribe("Integration Service E2E tests", Label("integration-service", "HACBS"), func() {
@@ -41,7 +38,8 @@ var _ = framework.IntegrationServiceSuiteDescribe("Integration Service E2E tests
 	var pipelineRun *v1beta1.PipelineRun
 	var component *appservice.Component
 	var timeout, interval time.Duration
-	//	var applicationSnapshots *[]appstudioshared.ApplicationSnapshot
+	var applicationSnapshot *appstudioshared.ApplicationSnapshot
+	var applicationSnapshot_push *appstudioshared.ApplicationSnapshot
 
 	var defaultBundleConfigMap *v1.ConfigMap
 
@@ -50,7 +48,7 @@ var _ = framework.IntegrationServiceSuiteDescribe("Integration Service E2E tests
 	Expect(err).NotTo(HaveOccurred())
 
 	BeforeAll(func() {
-		applicationName = fmt.Sprintf("integration-suite-test-application-%s", util.GenerateRandomString(4))
+		applicationName = fmt.Sprintf("integ-app-%s", util.GenerateRandomString(4))
 		appStudioE2EApplicationsNamespace = utils.GetGeneratedNamespace("integration-e2e")
 
 		_, err := f.CommonController.CreateTestNamespace(appStudioE2EApplicationsNamespace)
@@ -108,6 +106,9 @@ var _ = framework.IntegrationServiceSuiteDescribe("Integration Service E2E tests
 				}
 			}
 			_ = defaultBundleConfigMap.Data["default_build_bundle"]
+			_, err = f.IntegrationController.CreateIntegrationTestScenario(applicationName, appStudioE2EApplicationsNamespace, bundleURL, inPipelineName)
+			//_, err = f.IntegrationController.CreateReleasePlan(applicationName, appStudioE2EApplicationsNamespace)
+			Expect(err).ShouldNot(HaveOccurred())
 
 		})
 		It("triggers a PipelineRun", func() {
@@ -141,23 +142,62 @@ var _ = framework.IntegrationServiceSuiteDescribe("Integration Service E2E tests
 					return pipelineRun.IsDone()
 				}, timeout, interval).Should(BeTrue(), "timed out when waiting for the PipelineRun to finish")
 			})
-		})
 
-		//	It("check if the ApplicationSnapshot are created",func() {
-		//		applicationSnapshots, err = f.IntegrationController.GetAllApplicationSnapshots(applicationName, appStudioE2EApplicationsNamespace)
-		//		Expect(err).ShouldNot(HaveOccurred())
-		// TBD
-		//
-		//		 })
-		//		It("IntegrationTestScenarios are configed", Label("slow"), func() {
-		//			integrationTestScenarios, err := f.IntegrationController.GetIntegrationTestScenarios(applicationName, appStudioE2EApplicationsNamespace)
-		//			Expect(err).ShouldNot(HaveOccurred())
-		//                       for _, testScenario := range *integrationTestScenarios {
-		//      It("check if Integration Service PipelineRun is started"),func() {
-		// TBD
-		//     })
-		//			Expect(f.IntegrationController.WaitForIntegrationPipelineToBeFinished(&testScenario, applicationSnapshots, applicationName, appStudioE2EApplicationsNamespace)).To(Succeed(), "Error when waiting for a integration pipeline to finish")
-		//                       }
-		//		})
+			It("check if the integrationTestScenario is created", func() {
+				testScenarios, err := f.IntegrationController.GetIntegrationTestScenarios(applicationName, appStudioE2EApplicationsNamespace)
+				Expect(err).ShouldNot(HaveOccurred())
+				for _, testScenario := range *testScenarios {
+                                        klog.Infof("IntegrationTestScenario %s is found", testScenario.Name)
+                                }
+
+			})
+
+			It("check if the ApplicationSnapshot is created", func() {
+				applicationSnapshot, err = f.IntegrationController.GetApplicationSnapshot(applicationName, appStudioE2EApplicationsNamespace)
+				Expect(err).ShouldNot(HaveOccurred())
+				klog.Infof("applicationSnapshot %s is found", applicationSnapshot.Name)
+			})
+
+			It("check if all of the integrationPipelineRuns passed", Label("slow"), func() {
+				integrationTestScenarios, err := f.IntegrationController.GetIntegrationTestScenarios(applicationName, appStudioE2EApplicationsNamespace)
+				Expect(err).ShouldNot(HaveOccurred())
+				timeout = time.Second * 600
+				interval = time.Second * 10
+				for _, testScenario := range *integrationTestScenarios {
+					Eventually(func() bool {
+							Expect(f.IntegrationController.WaitForIntegrationPipelineToBeFinished(&testScenario, applicationSnapshot, applicationName, appStudioE2EApplicationsNamespace)).To(Succeed(), "Error when waiting for a integration pipeline to finish")
+							return true
+					}, timeout, interval).Should(BeTrue(), "timed out when waiting for the PipelineRun to finish")
+				}
+			})
+
+			It("create an applicationSnapshot of push event", func() {
+				applicationSnapshot_push, err = f.IntegrationController.CreateApplicationSnapshot(applicationName, appStudioE2EApplicationsNamespace, componentName)
+				Expect(err).ShouldNot(HaveOccurred())
+				klog.Infof("applicationSnapshot %s is found", applicationSnapshot_push.Name)
+			})
+
+			It("check if all of the integrationPipelineRuns created by push event passed", Label("slow"), func() {
+				integrationTestScenarios, err := f.IntegrationController.GetIntegrationTestScenarios(applicationName, appStudioE2EApplicationsNamespace)
+				Expect(err).ShouldNot(HaveOccurred())
+				timeout = time.Second * 600
+				interval = time.Second * 10
+				for _, testScenario := range *integrationTestScenarios {
+					Eventually(func() bool {
+						pipelineRun, err := f.IntegrationController.GetIntegrationPipelineRun(testScenario.Name, applicationSnapshot_push.Name, appStudioE2EApplicationsNamespace)
+						Expect(err).ShouldNot(HaveOccurred())
+
+						for _, condition := range pipelineRun.Status.Conditions {
+							klog.Infof("PipelineRun %s Status.Conditions.Reason: %s\n", pipelineRun.Name, condition.Reason)
+							if condition.Reason == "Failed" {
+								Fail(fmt.Sprintf("Pipelinerun %s has failed", pipelineRun.Name))
+							}
+						}
+						return pipelineRun.IsDone()
+					}, timeout, interval).Should(BeTrue(), "timed out when waiting for the PipelineRun to finish")
+				}
+			})
+
+		})
 	})
 })
