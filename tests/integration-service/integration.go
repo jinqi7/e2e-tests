@@ -24,22 +24,18 @@ const (
 	containerImageSource = "quay.io/redhat-appstudio-qe/busybox-loop:latest"
 	gitSourceRepoName    = "devfile-sample-python-basic"
 	gitSourceURL         = "https://github.com/redhat-appstudio-qe/" + gitSourceRepoName
-	bundleURL            = "quay.io/redhat-appstudio/example-test-bundle:build-pipeline-pass"
-	inPipelineName       = "component-pipeline-pass"
+	bundleURL            = "quay.io/redhat-appstudio/example-tekton-bundle:integration-pipeline-pass"
+	inPipelineName       = "integration-pipeline-pass"
 )
 
 var _ = framework.IntegrationServiceSuiteDescribe("Integration Service E2E tests", Label("integration-service", "HACBS"), func() {
-	// TODO Investigate issue with 'invalid memory address or nil pointer dereference' in integration-service
-	// Testsuite skipped
-	if true {
-		return
-	}
 	defer GinkgoRecover()
 
 	var applicationName, componentName, appStudioE2EApplicationsNamespace, outputContainerImage string
 	var timeout, interval time.Duration
 	var applicationSnapshot *appstudioApi.Snapshot
 	var applicationSnapshot_push *appstudioApi.Snapshot
+	var env *appstudioApi.Environment
 
 	var defaultBundleConfigMap *v1.ConfigMap
 
@@ -49,7 +45,7 @@ var _ = framework.IntegrationServiceSuiteDescribe("Integration Service E2E tests
 
 	BeforeAll(func() {
 		applicationName = fmt.Sprintf("integ-app-%s", util.GenerateRandomString(4))
-		appStudioE2EApplicationsNamespace = utils.GetGeneratedNamespace("integration-e2e")
+		appStudioE2EApplicationsNamespace = utils.GetGeneratedNamespace("integ-e2e")
 
 		_, err := f.CommonController.CreateTestNamespace(appStudioE2EApplicationsNamespace)
 		Expect(err).NotTo(HaveOccurred(), "Error when creating/updating '%s' namespace: %v", appStudioE2EApplicationsNamespace, err)
@@ -72,7 +68,7 @@ var _ = framework.IntegrationServiceSuiteDescribe("Integration Service E2E tests
 			timeout = time.Minute * 4
 			interval = time.Second * 1
 			// Create a component with Git Source URL being defined
-			_, err := f.HasController.CreateComponent(applicationName, componentName, appStudioE2EApplicationsNamespace, gitSourceURL, "", "", outputContainerImage, "")
+			_, err = f.HasController.CreateComponent(applicationName, componentName, appStudioE2EApplicationsNamespace, gitSourceURL, "", "", outputContainerImage, "")
 			Expect(err).ShouldNot(HaveOccurred())
 			DeferCleanup(f.HasController.DeleteHasComponent, componentName, appStudioE2EApplicationsNamespace, false)
 
@@ -87,6 +83,9 @@ var _ = framework.IntegrationServiceSuiteDescribe("Integration Service E2E tests
 			_ = defaultBundleConfigMap.Data["default_build_bundle"]
 			_, err = f.IntegrationController.CreateIntegrationTestScenario(applicationName, appStudioE2EApplicationsNamespace, bundleURL, inPipelineName)
 			Expect(err).ShouldNot(HaveOccurred())
+			_, err = f.IntegrationController.CreateReleasePlan(applicationName, appStudioE2EApplicationsNamespace)
+			Expect(err).ShouldNot(HaveOccurred())
+			env, err = f.IntegrationController.CreateEnvironment(appStudioE2EApplicationsNamespace)
 
 		})
 		It("triggers a PipelineRun", func() {
@@ -131,7 +130,7 @@ var _ = framework.IntegrationServiceSuiteDescribe("Integration Service E2E tests
 			})
 
 			It("check if the ApplicationSnapshot is created", func() {
-				applicationSnapshot, err = f.IntegrationController.GetApplicationSnapshot(applicationName, appStudioE2EApplicationsNamespace)
+				applicationSnapshot, err = f.IntegrationController.GetApplicationSnapshot("", appStudioE2EApplicationsNamespace)
 				Expect(err).ShouldNot(HaveOccurred())
 				klog.Infof("applicationSnapshot %s is found", applicationSnapshot.Name)
 			})
@@ -139,12 +138,31 @@ var _ = framework.IntegrationServiceSuiteDescribe("Integration Service E2E tests
 			It("check if all of the integrationPipelineRuns passed", Label("slow"), func() {
 				integrationTestScenarios, err := f.IntegrationController.GetIntegrationTestScenarios(applicationName, appStudioE2EApplicationsNamespace)
 				Expect(err).ShouldNot(HaveOccurred())
-				timeout = time.Second * 600
-				interval = time.Second * 10
 				for _, testScenario := range *integrationTestScenarios {
+					timeout = time.Second * 60
+					interval = time.Second * 2
 					Eventually(func() bool {
-						Expect(f.IntegrationController.WaitForIntegrationPipelineToBeFinished(&testScenario, applicationSnapshot, applicationName, appStudioE2EApplicationsNamespace)).To(Succeed(), "Error when waiting for a integration pipeline to finish")
-						return true
+						pipelineRun, err := f.IntegrationController.GetIntegrationPipelineRun(testScenario.Name, applicationSnapshot.Name, appStudioE2EApplicationsNamespace)
+						if err != nil {
+							klog.Infof("cannot get the Integration PipelineRun: %v", err)
+							return false
+						}
+						return pipelineRun.HasStarted()
+					}, timeout, interval).Should(BeTrue(), "timed out when waiting for the PipelineRun to start")
+					timeout = time.Second * 800
+					interval = time.Second * 10
+					Eventually(func() bool {
+						//Expect(f.IntegrationController.WaitForIntegrationPipelineToBeFinished(&testScenario, applicationSnapshot, applicationName, appStudioE2EApplicationsNamespace)).To(Succeed(), "Error when waiting for a integration pipeline to finish")
+						pipelineRun, err := f.IntegrationController.GetIntegrationPipelineRun(testScenario.Name, applicationSnapshot.Name, appStudioE2EApplicationsNamespace)
+						Expect(err).ShouldNot(HaveOccurred())
+
+						for _, condition := range pipelineRun.Status.Conditions {
+							klog.Infof("PipelineRun %s Status.Conditions.Reason: %s\n", pipelineRun.Name, condition.Reason)
+							if condition.Reason == "Failed" {
+								Fail(fmt.Sprintf("Pipelinerun %s has failed", pipelineRun.Name))
+							}
+						}
+						return pipelineRun.IsDone()
 					}, timeout, interval).Should(BeTrue(), "timed out when waiting for the PipelineRun to finish")
 				}
 			})
@@ -169,6 +187,7 @@ var _ = framework.IntegrationServiceSuiteDescribe("Integration Service E2E tests
 							return false
 						}
 						return pipelineRun.HasStarted()
+
 					}, timeout, interval).Should(BeTrue(), "timed out when waiting for the PipelineRun to start")
 					timeout = time.Second * 600
 					interval = time.Second * 10
@@ -187,6 +206,57 @@ var _ = framework.IntegrationServiceSuiteDescribe("Integration Service E2E tests
 				}
 			})
 
+			It("check if the global candidate is updated after push event", func() {
+				timeout = time.Second * 600
+				interval = time.Second * 10
+				Eventually(func() bool {
+					if f.IntegrationController.HaveHACBSTestsSucceeded(applicationSnapshot_push) {
+						component, _ := f.IntegrationController.GetComponent(applicationName, appStudioE2EApplicationsNamespace)
+						Expect(component.Spec.ContainerImage != "").To(BeTrue())
+						klog.Infof("Global candidate is updated\n")
+						return true
+					}
+					applicationSnapshot_push, err = f.IntegrationController.GetApplicationSnapshot(applicationSnapshot_push.Name, appStudioE2EApplicationsNamespace)
+					return false
+				}, timeout, interval).Should(BeTrue(), "time out when waiting for updating the global candidate")
+			})
+
+			It("check if a Release is created successfully", func() {
+				timeout = time.Second * 800
+				interval = time.Second * 10
+				Eventually(func() bool {
+					if f.IntegrationController.HaveHACBSTestsSucceeded(applicationSnapshot_push) {
+						releases, err := f.IntegrationController.GetReleasesWithApplicationSnapshot(applicationSnapshot_push, appStudioE2EApplicationsNamespace)
+						Expect(err).ShouldNot(HaveOccurred())
+						if len(*releases) != 0 {
+							for _, release := range *releases {
+								klog.Infof("Release %s is found\n", release.Name)
+							}
+						} else {
+							Fail("No Release found")
+						}
+						return true
+					}
+					applicationSnapshot_push, err = f.IntegrationController.GetApplicationSnapshot(applicationSnapshot_push.Name, appStudioE2EApplicationsNamespace)
+					return false
+				}, timeout, interval).Should(BeTrue(), "time out when waiting for release created")
+			})
+
+			It("check if an EnvironmentBinding is created successfully", func() {
+				timeout = time.Second * 600
+				interval = time.Second * 2
+				Eventually(func() bool {
+					if f.IntegrationController.HaveHACBSTestsSucceeded(applicationSnapshot_push) {
+						envbinding, err := f.IntegrationController.GetSnapshotEnvironmentBinding(applicationName, appStudioE2EApplicationsNamespace, env)
+						Expect(err).ShouldNot(HaveOccurred())
+						Expect(envbinding != nil).To(BeTrue())
+						klog.Infof("The EnvironmentBinding is created\n")
+						return true
+					}
+					applicationSnapshot_push, err = f.IntegrationController.GetApplicationSnapshot(applicationSnapshot_push.Name, appStudioE2EApplicationsNamespace)
+					return false
+				}, timeout, interval).Should(BeTrue(), "time out when waiting for release created")
+			})
 		})
 	})
 })
