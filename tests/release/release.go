@@ -3,13 +3,14 @@ package release
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 	tektonutils "github.com/redhat-appstudio/release-service/tekton/utils"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	ecp "github.com/enterprise-contract/enterprise-contract-controller/api/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	appservice "github.com/redhat-appstudio/application-api/api/v1alpha1"
+	appstudioApi "github.com/redhat-appstudio/application-api/api/v1alpha1"
 	"github.com/redhat-appstudio/e2e-tests/pkg/framework"
 	"github.com/redhat-appstudio/e2e-tests/pkg/utils"
 	"github.com/redhat-appstudio/e2e-tests/pkg/utils/tekton"
@@ -17,18 +18,27 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+const (
+        gitSourceRepoName      = "devfile-sample-python-basic"
+        gitSourceURL           = "https://github.com/redhat-appstudio-qe/" + gitSourceRepoName
+	roleReleaseSvcAccBindingName  =	"role-release-service-account-binding"
+	roleReleaseSvcAccName         = "role-release-service-account"
+	roleRefApiGroup               = "rbac.authorization.k8s.io"
+)
+
 var _ = framework.ReleaseSuiteDescribe("Release service happy path", Label("release", "happy-path", "HACBS"), func() {
 	defer GinkgoRecover()
 
 	var fw *framework.Framework
-	AfterEach(framework.ReportFailure(&fw))
 	var err error
-	var compName string
+
 	var devNamespace string
 	var managedNamespace = utils.GetGeneratedNamespace("release-service-e2e-managed")
 
-	var component *appservice.Component
+	var component *appstudioApi.Component
 	var releaseCR *releaseApi.Release
+
+	AfterEach(framework.ReportFailure(&fw))
 
 	BeforeAll(func() {
 		// Initialize the tests controllers
@@ -39,61 +49,15 @@ var _ = framework.ReleaseSuiteDescribe("Release service happy path", Label("rele
 		_, err = fw.AsKubeAdmin.CommonController.CreateTestNamespace(managedNamespace)
 		Expect(err).NotTo(HaveOccurred(), "Error when creating managedNamespace: %v", err)
 
-		sourceAuthJson := utils.GetEnv("QUAY_TOKEN", "")
-		Expect(sourceAuthJson).ToNot(BeEmpty())
+		CreateAndBindReleasePplSvcAccount(*fw, devNamespace, managedNamespace)
 
-		managedServiceAccount, err := fw.AsKubeAdmin.CommonController.CreateServiceAccount(releasePipelineServiceAccountDefault, managedNamespace, managednamespaceSecret, nil)
-		Expect(err).NotTo(HaveOccurred())
+		CreateAndLinkRegistryAuthSecret(*fw, devNamespace, managedNamespace)
 
-		_, err = fw.AsKubeAdmin.ReleaseController.CreateReleasePipelineRoleBindingForServiceAccount(devNamespace, managedServiceAccount)
-		Expect(err).NotTo(HaveOccurred())
-		_, err = fw.AsKubeAdmin.ReleaseController.CreateReleasePipelineRoleBindingForServiceAccount(managedNamespace, managedServiceAccount)
-		Expect(err).NotTo(HaveOccurred())
+		TestCreateApp(*fw, devNamespace, applicationNameDefault)
 
-		_, err = fw.AsKubeAdmin.CommonController.CreateRegistryAuthSecret(redhatAppstudioUserSecret, managedNamespace, sourceAuthJson)
-		Expect(err).ToNot(HaveOccurred())
+		component = TestCreateComponent(*fw, devNamespace, applicationNameDefault, componentName)
 
-		err = fw.AsKubeAdmin.CommonController.LinkSecretToServiceAccount(devNamespace, hacbsReleaseTestsTokenSecret, serviceAccount, true)
-		Expect(err).ToNot(HaveOccurred())
-
-		err = fw.AsKubeAdmin.CommonController.LinkSecretToServiceAccount(managedNamespace, redhatAppstudioUserSecret, serviceAccount, true)
-		Expect(err).ToNot(HaveOccurred())
-
-		publicKey, err := fw.AsKubeAdmin.TektonController.GetTektonChainsPublicKey()
-		Expect(err).ToNot(HaveOccurred())
-		Expect(fw.AsKubeAdmin.TektonController.CreateOrUpdateSigningSecret(
-			publicKey, publicSecretNameAuth, managedNamespace)).To(Succeed())
-
-		defaultEcPolicy, err := fw.AsKubeAdmin.TektonController.GetEnterpriseContractPolicy("default", "enterprise-contract-service")
-		Expect(err).NotTo(HaveOccurred())
-
-		defaultEcPolicySpec := ecp.EnterpriseContractPolicySpec{
-			Description: "Red Hat's enterprise requirements",
-			PublicKey:   string(publicKey),
-			Sources:     defaultEcPolicy.Spec.Sources,
-			Configuration: &ecp.EnterpriseContractPolicyConfiguration{
-				Collections: []string{"minimal"},
-				Exclude:     []string{"cve"},
-			},
-		}
-
-		// using cdq since git ref is not known
-		compName = componentName
-		var componentDetected appservice.ComponentDetectionDescription
-		cdq, err := fw.AsKubeAdmin.HasController.CreateComponentDetectionQuery(compName, devNamespace, gitSourceComponentUrl, "", "", "", false)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(cdq.Status.ComponentDetected).To(HaveLen(1), "Expected length of the detected Components was not 1")
-
-		for _, compDetected := range cdq.Status.ComponentDetected {
-			compName = compDetected.ComponentStub.ComponentName
-			componentDetected = compDetected
-		}
-
-		_, err = fw.AsKubeAdmin.HasController.CreateApplication(applicationNameDefault, devNamespace)
-		Expect(err).NotTo(HaveOccurred())
-
-		component, err = fw.AsKubeAdmin.HasController.CreateComponent(componentDetected.ComponentStub, devNamespace, "", "", applicationNameDefault, false, map[string]string{})
-		Expect(err).NotTo(HaveOccurred())
+		CreateECPolicy(*fw, managedNamespace, []string{"minimal"})
 
 		_, err = fw.AsKubeAdmin.ReleaseController.CreateReleasePlan(sourceReleasePlanName, devNamespace, applicationNameDefault, managedNamespace, "")
 		Expect(err).NotTo(HaveOccurred())
@@ -102,7 +66,7 @@ var _ = framework.ReleaseSuiteDescribe("Release service happy path", Label("rele
 			"mapping": map[string]interface{}{
 				"components": []map[string]interface{}{
 					{
-						"component":  compName,
+						"component":  componentName,
 						"repository": releasedImagePushRepo,
 					},
 				},
@@ -110,33 +74,11 @@ var _ = framework.ReleaseSuiteDescribe("Release service happy path", Label("rele
 		})
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = fw.AsKubeAdmin.ReleaseController.CreateReleasePlanAdmission(targetReleasePlanAdmissionName, managedNamespace, "", devNamespace, releaseStrategyPolicyDefault, releasePipelineServiceAccountDefault, []string{applicationNameDefault}, true, &tektonutils.PipelineRef{
-			Resolver: "git",
-			Params: []tektonutils.Param{
-				{Name: "url", Value: "https://github.com/redhat-appstudio/release-service-catalog"},
-				{Name: "revision", Value: "main"},
-				{Name: "pathInRepo", Value: "pipelines/e2e/e2e.yaml"},
-			},
-		}, &runtime.RawExtension{
-			Raw: data,
-		})
-		Expect(err).NotTo(HaveOccurred())
-
-		_, err = fw.AsKubeAdmin.TektonController.CreateEnterpriseContractPolicy(releaseStrategyPolicyDefault, managedNamespace, defaultEcPolicySpec)
-		Expect(err).NotTo(HaveOccurred())
+		CreateReleasePlanAdmission(*fw, devNamespace, managedNamespace, "pipelines/e2e/e2e.yaml", "", data)
 
 		_, err = fw.AsKubeAdmin.TektonController.CreatePVCInAccessMode(releasePvcName, managedNamespace, corev1.ReadWriteOnce)
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = fw.AsKubeAdmin.CommonController.CreateRole("role-release-service-account", managedNamespace, map[string][]string{
-			"apiGroupsList": {""},
-			"roleResources": {"secrets"},
-			"roleVerbs":     {"get", "list", "watch"},
-		})
-		Expect(err).NotTo(HaveOccurred())
-
-		_, err = fw.AsKubeAdmin.CommonController.CreateRoleBinding("role-release-service-account-binding", managedNamespace, "ServiceAccount", releasePipelineServiceAccountDefault, managedNamespace, "Role", "role-release-service-account", "rbac.authorization.k8s.io")
-		Expect(err).NotTo(HaveOccurred())
 	})
 
 	AfterAll(func() {
@@ -210,3 +152,106 @@ var _ = framework.ReleaseSuiteDescribe("Release service happy path", Label("rele
 		})
 	})
 })
+
+func TestCreateApp(fw framework.Framework, devNamespace string, applicationName string) {
+
+        app, err := fw.AsKubeAdmin.HasController.CreateApplication(applicationName, devNamespace)
+        Expect(err).NotTo(HaveOccurred())
+        Expect(utils.WaitUntil(fw.AsKubeAdmin.HasController.ApplicationGitopsRepoExists(app.Status.Devfile), 30*time.Second)).To(
+                Succeed(), fmt.Sprintf("timed out waiting for gitops content to be created for app %s in namespace %s: %+v", app.Name, app.Namespace, err),
+        )
+}
+
+func TestCreateComponent(fw framework.Framework, devNamespace, applicationName string, compName string) *appstudioApi.Component{
+	var newComponent *appstudioApi.Component
+
+	// using cdq since git ref is not known
+	cdq, err := fw.AsKubeAdmin.HasController.CreateComponentDetectionQuery(compName, devNamespace, gitSourceComponentUrl, "", "", "", false)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(cdq.Status.ComponentDetected).To(HaveLen(1), "Expected length of the detected Components was not 1")
+
+	for _, compDetected := range cdq.Status.ComponentDetected {
+		componentDetected := compDetected
+		newComponent, err = fw.AsKubeAdmin.HasController.CreateComponent(componentDetected.ComponentStub, devNamespace, "", "", applicationNameDefault, false, map[string]string{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(newComponent).NotTo(BeNil())
+	}
+	return newComponent
+}
+
+func CreateECPolicy(fw framework.Framework, managedNamespace string, ecCollections []string){
+	publicKey, err := fw.AsKubeAdmin.TektonController.GetTektonChainsPublicKey()
+	Expect(err).ToNot(HaveOccurred())
+	Expect(fw.AsKubeAdmin.TektonController.CreateOrUpdateSigningSecret(
+		publicKey, publicSecretNameAuth, managedNamespace)).To(Succeed())
+
+	defaultEcPolicy, err := fw.AsKubeAdmin.TektonController.GetEnterpriseContractPolicy("default", "enterprise-contract-service")
+	Expect(err).NotTo(HaveOccurred())
+
+	defaultEcPolicySpec := ecp.EnterpriseContractPolicySpec{
+		Description: "Red Hat's enterprise requirements",
+		PublicKey:   string(publicKey),
+		Sources:     defaultEcPolicy.Spec.Sources,
+		Configuration: &ecp.EnterpriseContractPolicyConfiguration{
+			Collections: ecCollections,
+			Exclude:     []string{"cve"},
+		},
+	}
+	_, err = fw.AsKubeAdmin.TektonController.CreateEnterpriseContractPolicy(releaseStrategyPolicyDefault, managedNamespace, defaultEcPolicySpec)
+	Expect(err).NotTo(HaveOccurred())
+}
+
+func CreateAndLinkRegistryAuthSecret(fw framework.Framework, devNamespace, managedNamespace string){
+	var err error
+
+	sourceAuthJson := utils.GetEnv("QUAY_TOKEN", "")
+	Expect(sourceAuthJson).ToNot(BeEmpty())
+
+	_, err = fw.AsKubeAdmin.CommonController.CreateRegistryAuthSecret(redhatAppstudioUserSecret, managedNamespace, sourceAuthJson)
+	Expect(err).ToNot(HaveOccurred())
+
+	err = fw.AsKubeAdmin.CommonController.LinkSecretToServiceAccount(devNamespace, hacbsReleaseTestsTokenSecret, serviceAccount, true)
+	Expect(err).ToNot(HaveOccurred())
+
+	err = fw.AsKubeAdmin.CommonController.LinkSecretToServiceAccount(managedNamespace, redhatAppstudioUserSecret, serviceAccount, true)
+	Expect(err).ToNot(HaveOccurred())
+}
+
+func CreateAndBindReleasePplSvcAccount(fw framework.Framework, devNamespace, managedNamespace string){
+	var err error
+
+	managedServiceAccount, err := fw.AsKubeAdmin.CommonController.CreateServiceAccount(releasePipelineServiceAccountDefault, managedNamespace, managednamespaceSecret, nil)
+	Expect(err).NotTo(HaveOccurred())
+
+	_, err = fw.AsKubeAdmin.ReleaseController.CreateReleasePipelineRoleBindingForServiceAccount(devNamespace, managedServiceAccount)
+	Expect(err).NotTo(HaveOccurred())
+
+	_, err = fw.AsKubeAdmin.ReleaseController.CreateReleasePipelineRoleBindingForServiceAccount(managedNamespace, managedServiceAccount)
+	Expect(err).NotTo(HaveOccurred())
+
+	_, err = fw.AsKubeAdmin.CommonController.CreateRole(roleReleaseSvcAccName, managedNamespace, map[string][]string{
+		"apiGroupsList": {""},
+		"roleResources": {"secrets"},
+		"roleVerbs":     {"get", "list", "watch"},
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	_, err = fw.AsKubeAdmin.CommonController.CreateRoleBinding(roleReleaseSvcAccBindingName, managedNamespace, "ServiceAccount", releasePipelineServiceAccountDefault, managedNamespace, "Role", roleReleaseSvcAccName, roleRefApiGroup)
+	Expect(err).NotTo(HaveOccurred())
+}
+
+func CreateReleasePlanAdmission(fw framework.Framework, devNamespace, managedNamespace, pathInRepoValue, releaseEnvironment string, data []byte) {
+	var err error
+
+	_, err = fw.AsKubeAdmin.ReleaseController.CreateReleasePlanAdmission(targetReleasePlanAdmissionName, managedNamespace, releaseEnvironment, devNamespace, releaseStrategyPolicyDefault, releasePipelineServiceAccountDefault, []string{applicationNameDefault}, true, &tektonutils.PipelineRef{
+		Resolver: "git",
+		Params: []tektonutils.Param{
+			{Name: "url", Value: "https://github.com/redhat-appstudio/release-service-catalog"},
+			{Name: "revision", Value: "main"},
+			{Name: "pathInRepo", Value: pathInRepoValue},
+		},
+	}, &runtime.RawExtension{
+		Raw: data,
+	})
+	Expect(err).NotTo(HaveOccurred())
+}
