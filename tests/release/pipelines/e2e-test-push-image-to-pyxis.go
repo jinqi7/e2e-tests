@@ -40,6 +40,7 @@ var _ = framework.ReleaseSuiteDescribe("[HACBS-1571]test-release-e2e-push-image-
 	var component1, component2 *appservice.Component
 	var snapshot1, snapshot2 *appservice.Snapshot
 	var releaseCR1, releaseCR2 *releaseApi.Release
+	var comps []map[string]interface{}
 
 	var componentDetected, additionalComponentDetected appservice.ComponentDetectionDescription
 
@@ -67,6 +68,9 @@ var _ = framework.ReleaseSuiteDescribe("[HACBS-1571]test-release-e2e-push-image-
 
 		// Linking the build secret to the pipeline service account in dev namespace.
 		err = fw.AsKubeAdmin.CommonController.LinkSecretToServiceAccount(devNamespace, hacbsReleaseTestsTokenSecret, serviceAccount, true)
+		Expect(err).ToNot(HaveOccurred())
+
+		err = fw.AsKubeAdmin.CommonController.LinkSecretToServiceAccount(managedNamespace, hacbsReleaseTestsTokenSecret, serviceAccount, true)
 		Expect(err).ToNot(HaveOccurred())
 
 		publicKey, err := fw.AsKubeAdmin.TektonController.GetTektonChainsPublicKey()
@@ -145,37 +149,6 @@ var _ = framework.ReleaseSuiteDescribe("[HACBS-1571]test-release-e2e-push-image-
 		_, err = fw.AsKubeAdmin.ReleaseController.CreateReleasePlan(sourceReleasePlanName, devNamespace, applicationNameDefault, managedNamespace, "")
 		Expect(err).NotTo(HaveOccurred())
 
-		data, err := json.Marshal(map[string]interface{}{
-			"mapping": map[string]interface{}{
-				"components": []map[string]interface{}{
-					{
-						"component":  compName,
-						"repository": releasedImagePushRepo,
-					},
-					{
-						"component":  additionalComponentName,
-						"repository": additionalReleasedImagePushRepo,
-					},
-				},
-			},
-			"pyxis": map[string]interface{}{
-				"server": "stage",
-				"secret": "pyxis",
-			},
-		})
-		Expect(err).NotTo(HaveOccurred())
-
-		_, err = fw.AsKubeAdmin.ReleaseController.CreateReleasePlanAdmission(targetReleasePlanAdmissionName, managedNamespace, releaseEnvironment, devNamespace, releaseStrategyPolicyDefault, releaseStrategyServiceAccountDefault, []string{applicationNameDefault}, true, &tektonutils.PipelineRef{
-			Resolver: "git",
-			Params: []tektonutils.Param{
-				{Name: "url", Value: "https://github.com/redhat-appstudio/release-service-catalog"},
-				{Name: "revision", Value: "main"},
-				{Name: "pathInRepo", Value: "pipelines/push-to-external-registry/push-to-external-registry.yaml"},
-			},
-		}, &runtime.RawExtension{
-			Raw: data,
-		})
-		Expect(err).NotTo(HaveOccurred())
 
 		_, err = fw.AsKubeAdmin.TektonController.CreateEnterpriseContractPolicy(releaseStrategyPolicyDefault, managedNamespace, defaultEcPolicySpec)
 		Expect(err).NotTo(HaveOccurred())
@@ -214,12 +187,168 @@ var _ = framework.ReleaseSuiteDescribe("[HACBS-1571]test-release-e2e-push-image-
 			component1, err = fw.AsKubeAdmin.HasController.CreateComponent(componentDetected.ComponentStub, devNamespace, "", "", applicationNameDefault, true, map[string]string{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(fw.AsKubeAdmin.HasController.WaitForComponentPipelineToBeFinished(component1, "", 2, fw.AsKubeAdmin.TektonController)).To(Succeed())
+			pipelineRun, err := fw.AsKubeDeveloper.IntegrationController.GetBuildPipelineRun(component1.Name, applicationNameDefault, devNamespace, false, "")
+			Expect(err).NotTo(HaveOccurred())
+
+			var imageDigest string
+			for _, pipelineResult := range pipelineRun.Status.PipelineResults {
+			//	if pipelineResult.Name == "IMAGE_URL" {
+			//		containerImage = pipelineResult.Value.StringVal
+			//	}
+				if pipelineResult.Name == "IMAGE_DIGEST" {
+					imageDigest = pipelineResult.Value.StringVal
+				}
+			}
+			comps = append(comps, map[string]interface{}{
+					"repository" : releasedImagePushRepo,
+					//"repository" :gitSourceComponentUrl,
+					"containerImage" : "quay.io/qijing/" + devNamespace + "/appstudio/" + compName + "@" + imageDigest,
+					"name" : compName,
+					"source":map[string]interface{}{
+						"git": map[string]interface{}{
+							"revision":"fc7307a5af13332de2165f401d18d5cf2ee75204",
+							"url":"https://github.com/scoheb/dc-metro-map",
+						},
+					},
+				})
+			data, err := json.Marshal(map[string]interface{}{
+				"mapping": map[string]interface{}{
+					"components": comps,
+				},
+				"pyxis": map[string]interface{}{
+					"server": "stage",
+					"secret": "pyxis",
+				},
+				"images": map[string]interface{}{
+					//"addGitShaTag": "true",
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = fw.AsKubeAdmin.ReleaseController.CreateReleasePlanAdmission(targetReleasePlanAdmissionName, managedNamespace, releaseEnvironment, devNamespace, releaseStrategyPolicyDefault, releaseStrategyServiceAccountDefault, []string{applicationNameDefault}, true, &tektonutils.PipelineRef{
+				Resolver: "git",
+				Params: []tektonutils.Param{
+					{Name: "url", Value: "https://github.com/redhat-appstudio/release-service-catalog"},
+					{Name: "revision", Value: "main"},
+					{Name: "pathInRepo", Value: "pipelines/push-to-external-registry/push-to-external-registry.yaml"},
+				},
+			}, &runtime.RawExtension{
+				Raw: data,
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("tests that Snapshot is created for each Component", func() {
+			Eventually(func() error {
+				snapshot1, err = fw.AsKubeAdmin.IntegrationController.GetSnapshot("", "", component1.GetName(), devNamespace)
+				if err != nil {
+					GinkgoWriter.Printf("cannot get the Snapshot for component %s/%s: %v\n", component1.GetNamespace(), component1.GetName(), err)
+					return err
+				}
+				return nil
+			}, snapshotCreationTimeout, defaultInterval).Should(Succeed(), "timed out waiting for Snapshots to be created in %s namespace", devNamespace)
+		})
+
+		It("tests that associated Release CR is created for first Component's Snapshot", func() {
+			Eventually(func() error {
+				releaseCR1, err = fw.AsKubeAdmin.ReleaseController.GetRelease("", snapshot1.GetName(), devNamespace)
+				if err != nil {
+					GinkgoWriter.Printf("cannot get the Release CR for snapshot %s/%s: %v\n", snapshot1.GetNamespace(), component1.GetName(), err)
+					return err
+				}
+				return nil
+			}, releaseCreationTimeout, defaultInterval).Should(Succeed(), "timed out waiting for Release CRs to be created in %s namespace", devNamespace)
+		})
+
+		It("verifies that Release PipelineRun is triggered for each Release CR", func() {
+			Eventually(func() error {
+				releasePR1, err = fw.AsKubeAdmin.ReleaseController.GetPipelineRunInNamespace(managedNamespace, releaseCR1.GetName(), releaseCR1.GetNamespace())
+				if err != nil {
+					GinkgoWriter.Printf("release pipelineRun for Release %s/%s not created yet: %+v\n", releaseCR1.GetNamespace(), releaseCR1.GetName(), err)
+					return err
+				}
+				var errMsg string
+				for _, pr := range []*v1beta1.PipelineRun{releasePR1} {
+					Expect(utils.HasPipelineRunFailed(pr)).ToNot(BeTrue(), fmt.Sprintf("Release PipelineRun %s/%s failed", pr.GetNamespace(), pr.GetName()))
+					if !pr.HasStarted() {
+						errMsg += fmt.Sprintf("Release PipelineRun %s/%s did not started yet\n", pr.GetNamespace(), pr.GetName())
+					}
+				}
+				if len(errMsg) > 1 {
+					return fmt.Errorf(errMsg)
+				}
+				return nil
+			}, releasePipelineRunCreationTimeout, constants.PipelineRunPollingInterval).Should(Succeed(), fmt.Sprintf("timed out waiting for a PipelineRun to start for each Release CR in %s namespace", managedNamespace))
+		})
+
+		It("tests that associated Release CR has completed for first Component's Snapshot", func() {
+			Eventually(func() error {
+				var errMsg string
+				for _, cr := range []*releaseApi.Release{releaseCR1} {
+					cr, err = fw.AsKubeAdmin.ReleaseController.GetRelease("", cr.Spec.Snapshot, devNamespace)
+					Expect(err).ShouldNot(HaveOccurred())
+					if !cr.IsReleased() {
+						errMsg += fmt.Sprintf("release %s/%s is not marked as finished yet", cr.GetNamespace(), cr.GetName())
+					}
+				}
+				if len(errMsg) > 1 {
+					return fmt.Errorf(errMsg)
+				}
+				return nil
+			}, releasePipelineRunCompletionTimeout, defaultInterval).Should(Succeed(), "timed out waiting for Release CRs to be created in %s namespace", devNamespace)
+			err = fw.AsKubeAdmin.ReleaseController.DeleteReleasePlanAdmission(targetReleasePlanAdmissionName, managedNamespace, false)
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("verifies that Component 2 can be created and build PipelineRun is created for it in dev namespace and succeeds", func() {
 			component2, err = fw.AsKubeAdmin.HasController.CreateComponent(additionalComponentDetected.ComponentStub, devNamespace, "", "", applicationNameDefault, true, map[string]string{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(fw.AsKubeAdmin.HasController.WaitForComponentPipelineToBeFinished(component2, "", 2, fw.AsKubeAdmin.TektonController)).To(Succeed())
+			pipelineRun, err := fw.AsKubeDeveloper.IntegrationController.GetBuildPipelineRun(component2.Name, applicationNameDefault, devNamespace, false, "")
+			Expect(err).NotTo(HaveOccurred())
+
+			var  imageDigest string
+			//var containerImage, imageDigest string
+			for _, pipelineResult := range pipelineRun.Status.PipelineResults {
+			//	if pipelineResult.Name == "IMAGE_URL" {
+			//		containerImage = pipelineResult.Value.StringVal
+			//	}
+				if pipelineResult.Name == "IMAGE_DIGEST" {
+					imageDigest = pipelineResult.Value.StringVal
+				}
+			}
+			comps = append(comps, map[string]interface{}{
+					"component" : additionalComponentName,
+					//"repository" : additionalReleasedImagePushRepo,
+					"containerImage" : "quay.io/qijing/" + devNamespace + "/appstudio/" + compName + "@" + imageDigest,
+					"repository" : additionalGitSourceComponentUrl,
+					//"containerImage" : containerImage + "@" + imageDigest,
+				})
+			data, err := json.Marshal(map[string]interface{}{
+				"mapping": map[string]interface{}{
+					"components": comps,
+				},
+				"pyxis": map[string]interface{}{
+					"server": "stage",
+					"secret": "pyxis",
+				},
+				"images": map[string]interface{}{
+			//		"addGitShaTag": "true",
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = fw.AsKubeAdmin.ReleaseController.CreateReleasePlanAdmission(targetReleasePlanAdmissionName, managedNamespace, releaseEnvironment, devNamespace, releaseStrategyPolicyDefault, releaseStrategyServiceAccountDefault, []string{applicationNameDefault}, true, &tektonutils.PipelineRef{
+				Resolver: "git",
+				Params: []tektonutils.Param{
+					{Name: "url", Value: "https://github.com/redhat-appstudio/release-service-catalog"},
+					{Name: "revision", Value: "main"},
+					{Name: "pathInRepo", Value: "pipelines/push-to-external-registry/push-to-external-registry.yaml"},
+				},
+			}, &runtime.RawExtension{
+				Raw: data,
+			})
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("tests that Snapshot is created for each Component", func() {
@@ -236,6 +365,52 @@ var _ = framework.ReleaseSuiteDescribe("[HACBS-1571]test-release-e2e-push-image-
 				}
 				return nil
 			}, snapshotCreationTimeout, defaultInterval).Should(Succeed(), "timed out waiting for Snapshots to be created in %s namespace", devNamespace)
+
+		//	var comps []map[string]interface{}
+
+		//	for _, individualComponent := range snapshot2.Spec.Components {
+		//		comp := individualComponent
+		//		containerImage := comp.ContainerImage
+		//		if compName == comp.Name {
+		//			comps = append(comps, map[string]interface{}{
+		//				"component" : compName,
+		//				"repository" : releasedImagePushRepo,
+		//				"containerImage" : containerImage,
+		//			})
+		//		} else {
+		//			comps = append(comps, map[string]interface{}{
+                 //                               "component" : additionalComponentName,
+                  //                              "repository" : additionalReleasedImagePushRepo,
+                   //                             "containerImage" : containerImage,
+		//			})
+		//		}
+		//	}
+
+		//	data, err := json.Marshal(map[string]interface{}{
+		//		"mapping": map[string]interface{}{
+		//			"components": comps,
+		//		},
+		//		"pyxis": map[string]interface{}{
+		//			"server": "stage",
+		//			"secret": "pyxis",
+		//		},
+		//		"images": map[string]interface{}{
+		//			"addGitShaTag": "true",
+		//		},
+		//	})
+		//	Expect(err).NotTo(HaveOccurred())
+
+		//	_, err = fw.AsKubeAdmin.ReleaseController.CreateReleasePlanAdmission(targetReleasePlanAdmissionName, managedNamespace, releaseEnvironment, devNamespace, releaseStrategyPolicyDefault, releaseStrategyServiceAccountDefault, []string{applicationNameDefault}, true, &tektonutils.PipelineRef{
+		//		Resolver: "git",
+		//		Params: []tektonutils.Param{
+		//			{Name: "url", Value: "https://github.com/redhat-appstudio/release-service-catalog"},
+		//			{Name: "revision", Value: "main"},
+		//			{Name: "pathInRepo", Value: "pipelines/push-to-external-registry/push-to-external-registry.yaml"},
+		//		},
+		//	}, &runtime.RawExtension{
+		//		Raw: data,
+		//	})
+		//	Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("tests that associated Release CR is created for each Component's Snapshot", func() {
