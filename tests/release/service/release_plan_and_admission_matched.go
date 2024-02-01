@@ -79,6 +79,9 @@ var _ = framework.ReleaseServiceSuiteDescribe("ReleasePlan and ReleasePlanAdmiss
 					if condition == nil {
 						return fmt.Errorf("the MatchedConditon of %s is still not set", releasePlanCR.Name)
 					}
+					if condition.Status == metav1.ConditionFalse {
+						return fmt.Errorf("the MatchedConditon of %s has not reconciled yet", ReleasePlanCR.Name)
+					}
 					return nil
 				}, releasecommon.ReleasePlanStatusUpdateTimeout, releasecommon.DefaultInterval).Should(Succeed())
 				Expect(releasePlanCR.IsMatched()).To(BeTrue())
@@ -93,6 +96,9 @@ var _ = framework.ReleaseServiceSuiteDescribe("ReleasePlan and ReleasePlanAdmiss
 					condition := meta.FindStatusCondition(releasePlanAdmissionCR.Status.Conditions, releaseApi.MatchedConditionType.String())
 					if condition == nil {
 						return fmt.Errorf("the MatchedConditon of %s is still not set", releasePlanAdmissionCR.Name)
+					}
+					if condition.Status == metav1.ConditionFalse {
+						return fmt.Errorf("the MatchedConditon of %s has not reconciled yet", ReleasePlanAdmissionCR.Name)
 					}
 					return nil
 				}, releasecommon.ReleasePlanStatusUpdateTimeout, releasecommon.DefaultInterval).Should(Succeed(), "time out when waiting for ReleasePlanAdmission being reconciled to matched")
@@ -117,6 +123,9 @@ var _ = framework.ReleaseServiceSuiteDescribe("ReleasePlan and ReleasePlanAdmiss
 					condition := meta.FindStatusCondition(secondReleasePlanCR.Status.Conditions, releaseApi.MatchedConditionType.String())
 					if condition == nil {
 						return fmt.Errorf("the MatchedConditon of %s is still not set", secondReleasePlanCR.Name)
+					}
+					if condition.Status == metav1.ConditionFalse {
+						return fmt.Errorf("the MatchedConditon of %s has not reconciled yet", secondReleasePlanCR.Name)
 					}
 					return nil
 				}, releasecommon.ReleasePlanStatusUpdateTimeout, releasecommon.DefaultInterval).Should(Succeed())
