@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/devfile/library/v2/pkg/util"
-	"github.com/google/go-github/v44/github"
+	"github.com/google/go-github/v60/github"
 	"github.com/redhat-appstudio/e2e-tests/pkg/clients/has"
 	"github.com/redhat-appstudio/e2e-tests/pkg/constants"
 	"github.com/redhat-appstudio/e2e-tests/pkg/framework"

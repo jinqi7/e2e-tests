@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/go-github/v44/github"
+	"github.com/google/go-github/v60/github"
 )
 
 func (g *Github) GetPullRequest(repository string, id int) (*github.PullRequest, error) {

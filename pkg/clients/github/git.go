@@ -8,7 +8,7 @@ import (
 
 	. "github.com/onsi/gomega"
 
-	"github.com/google/go-github/v44/github"
+	"github.com/google/go-github/v60/github"
 )
 
 func (g *Github) DeleteRef(repository, branchName string) error {

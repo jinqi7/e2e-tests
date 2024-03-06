@@ -4,9 +4,69 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/google/go-github/v44/github"
+//	"github.com/google/go-github/v44/github"
+	"github.com/google/go-github/v60/github"
 	. "github.com/onsi/ginkgo/v2"
 )
+
+//https://github.com/google/go-github/blob/master/github/repos.go
+func (g *Github) CheckIfForkExist(repositoryName, ownerName string) (bool, error) {
+	opt := &github.RepositoryListByUserOptions{Type: "owner",}
+	repos, _, err := g.client.Repositories.ListByUser(context.Background(), ownerName, opt)
+	if err != nil {
+		GinkgoWriter.Printf("error when listing forks by user %s : %v\n", ownerName, err)
+		return false, err
+	}
+	if repos != nil {
+		for _, repo := range repos {
+			GinkgoWriter.Printf("Fork for owner %s is found in repo %s \n", ownerName, repo.FullName)
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func (g *Github) CreateFork(repositoryName string) error {
+	opt := &github.RepositoryCreateForkOptions{Organization: g.organization, Name: repositoryName, DefaultBranchOnly: true}
+	repo, _, err := g.client.Repositories.CreateFork(context.Background(), g.organization, repositoryName, opt)
+	if err != nil {
+		GinkgoWriter.Printf("error when creating fork for repository %s : %v\n", repositoryName, err)
+		return err
+	}
+	GinkgoWriter.Printf("Created a fork for repository %s\n", repo.Name)
+	return nil
+}
+
+//https://github.com/google/go-github/blob/master/github/repos_merging.go#L62
+func (g *Github) MergeUpstream(owner, repositoryName, baseBranch string) (bool, error) {
+	input := &github.RepoMergeUpstreamRequest{Branch: &baseBranch}
+	result, _, err := g.client.Repositories.MergeUpstream(context.Background(), owner, repositoryName, input)
+	if err != nil {
+		GinkgoWriter.Printf("error when syncing with upstream %s : %v\n", repositoryName, err)
+		return false, err
+	}
+	GinkgoWriter.Printf("Merged with upstream repository %s\n", result.MergeType)
+	return true, nil
+}
+
+//https://github.com/google/go-github/blob/master/github/repos_releases.go
+func (g *Github) CheckIfReleaseExist(owner, repositoryName, tagName string) bool {
+	opt := &github.ListOptions{Page: 2}
+	releases, _, err := g.client.Repositories.ListReleases(context.Background(), owner, repositoryName, opt)
+	if err != nil {
+		GinkgoWriter.Printf("error when listing Releases %s : %v\n", repositoryName, err)
+		return false
+	}
+	//https://github.com/google/go-github/blob/master/github/repos_releases.go#L21
+	for _, release := range releases {
+		releaseTagName :=  release.TagName
+		if tagName == *releaseTagName {
+			return true
+		}
+	}
+	GinkgoWriter.Printf("Release tag %s is not found in repository %s \n", tagName, repositoryName)
+	return false
+}
 
 func (g *Github) CheckIfRepositoryExist(repository string) bool {
 	_, resp, err := g.client.Repositories.Get(context.Background(), g.organization, repository)
