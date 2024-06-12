@@ -16,10 +16,10 @@ import (
 	"github.com/konflux-ci/e2e-tests/pkg/utils"
 	"github.com/konflux-ci/e2e-tests/pkg/utils/tekton"
 	releasecommon "github.com/konflux-ci/e2e-tests/tests/release"
+	releaseapi "github.com/konflux-ci/release-service/api/v1alpha1"
+	tektonutils "github.com/konflux-ci/release-service/tekton/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	releaseapi "github.com/redhat-appstudio/release-service/api/v1alpha1"
-	tektonutils "github.com/redhat-appstudio/release-service/tekton/utils"
 	tektonv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -246,6 +246,8 @@ func createADVSReleasePlanAdmission(advsRPAName string, managedFw framework.Fram
 				{
 					"name":       component.GetName(),
 					"repository": "quay.io/redhat-pending/rhtap----konflux-release-e2e",
+					"tags": []string{"latest", "latest-{{ timestamp }}", "testtag",
+						"testtag-{{ timestamp }}", "testtag2", "testtag2-{{ timestamp }}"},
 				},
 			},
 		},
@@ -260,13 +262,6 @@ func createADVSReleasePlanAdmission(advsRPAName string, managedFw framework.Fram
 			"product_stream":  "rhtas-tp1",
 			"product_version": "v1.0",
 			"type":            "RHSA",
-		},
-		"images": map[string]interface{}{
-			"defaultTag":      "latest",
-			"addGitShaTag":    false,
-			"addTimestampTag": false,
-			"addSourceShaTag": false,
-			"floatingTags":    []string{"testtag", "testtag2"},
 		},
 		"sign": map[string]interface{}{
 			"configMapName": "hacbs-signing-pipeline-config-redhatbeta2",
