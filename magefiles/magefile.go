@@ -35,6 +35,7 @@ import (
 	"github.com/konflux-ci/image-controller/pkg/quay"
 	"github.com/magefile/mage/sh"
 	tektonapi "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
+	"k8s.io/apimachinery/pkg/selection"
 )
 
 const (
@@ -253,7 +254,6 @@ func (ci CI) PerformOpenShiftUpgrade() error {
 }
 
 func (ci CI) TestE2E() error {
-	var testFailure bool
 
 	if err := ci.init(); err != nil {
 		return fmt.Errorf("error when running ci init: %v", err)
@@ -279,34 +279,20 @@ func (ci CI) TestE2E() error {
 		}
 	}
 
-	if requiresSprayProxyRegistering {
-		err := registerPacServer()
-		if err != nil {
-			os.Setenv(constants.SKIP_PAC_TESTS_ENV, "true")
-			if alertErr := HandleErrorWithAlert(fmt.Errorf("failed to register SprayProxy: %+v", err), slack.ErrorSeverityLevelError); alertErr != nil {
-				return alertErr
-			}
-		}
-	}
-
 	if err := RunE2ETests(); err != nil {
-		testFailure = true
-	}
-
-	if requiresSprayProxyRegistering && sprayProxyConfig != nil {
-		err := unregisterPacServer()
-		if err != nil {
-			if alertErr := HandleErrorWithAlert(fmt.Errorf("failed to unregister SprayProxy: %+v", err), slack.ErrorSeverityLevelInfo); alertErr != nil {
-				klog.Warning(alertErr)
-			}
-		}
-	}
-
-	if testFailure {
-		return fmt.Errorf("error when running e2e tests - see the log above for more details")
+		return fmt.Errorf("error when running e2e tests: %+v", err)
 	}
 
 	return nil
+}
+
+func (ci CI) UnregisterSprayproxy() {
+	err := unregisterPacServer()
+	if err != nil {
+		if alertErr := HandleErrorWithAlert(fmt.Errorf("failed to unregister SprayProxy: %+v", err), slack.ErrorSeverityLevelInfo); alertErr != nil {
+			klog.Warning(alertErr)
+		}
+	}
 }
 
 func RunE2ETests() error {
@@ -627,6 +613,266 @@ func SetupMultiPlatformTests() error {
 	return nil
 }
 
+func SetupMultiArchTests() error {
+	klog.Infof("going to create new Tekton bundle remote-build for the purpose of testing multi-platform-controller PR")
+	var err error
+	var defaultBundleRef string
+	var tektonObj runtime.Object
+
+	platformType := "linux/arm64"
+
+	tag := fmt.Sprintf("%d-%s", time.Now().Unix(), util.GenerateRandomString(4))
+	quayOrg := utils.GetEnv(constants.DEFAULT_QUAY_ORG_ENV, constants.DefaultQuayOrg)
+	newMultiPlatformBuilderPipelineImg := strings.ReplaceAll(constants.DefaultImagePushRepo, constants.DefaultQuayOrg, quayOrg)
+	var newRemotePipeline, _ = name.ParseReference(fmt.Sprintf("%s:pipeline-bundle-%s", newMultiPlatformBuilderPipelineImg, tag))
+	var newPipelineYaml []byte
+
+	if err = utils.CreateDockerConfigFile(os.Getenv("QUAY_TOKEN")); err != nil {
+		return fmt.Errorf("failed to create docker config file: %+v", err)
+	}
+	if defaultBundleRef, err = tekton.GetDefaultPipelineBundleRef(constants.BuildPipelineConfigConfigMapYamlURL, "docker-build"); err != nil {
+		return fmt.Errorf("failed to get the pipeline bundle ref: %+v", err)
+	}
+	if tektonObj, err = tekton.ExtractTektonObjectFromBundle(defaultBundleRef, "pipeline", "docker-build"); err != nil {
+		return fmt.Errorf("failed to extract the Tekton Pipeline from bundle: %+v", err)
+	}
+	dockerPipelineObject := tektonObj.(*tektonapi.Pipeline)
+
+	var currentBuildahTaskRef string
+	for i := range dockerPipelineObject.PipelineSpec().Tasks {
+		t := &dockerPipelineObject.PipelineSpec().Tasks[i]
+		/*
+		if t.Name == "apply-tags" {
+			applyTags := &dockerPipelineObject.PipelineSpec().Tasks[i]
+			applyTags.RunAfter = []string{"build-container-manifest"}
+		}
+		*/
+		params := t.TaskRef.Params
+		var lastBundle *tektonapi.Param
+		var lastName *tektonapi.Param
+		buildahTask := false
+		for i, param := range params {
+			if param.Name == "bundle" {
+				lastBundle = &t.TaskRef.Params[i]
+				} else if param.Name == "name" && param.Value.StringVal == "buildah" {
+					lastName = &t.TaskRef.Params[i]
+					buildahTask = true
+				}
+			}
+			if buildahTask {
+				currentBuildahTaskRef = lastBundle.Value.StringVal
+				klog.Infof("Found current task ref %s", currentBuildahTaskRef)
+				//TODO: current use pinned sha?
+				lastBundle.Value = *tektonapi.NewStructuredValues("quay.io/redhat-appstudio-tekton-catalog/task-buildah-remote:0.1-ac185e95bbd7a25c1c4acf86995cbaf30eebedc4")
+				lastName.Value = *tektonapi.NewStructuredValues("buildah-remote")
+				t.Params = append(t.Params, tektonapi.Param{Name: "PLATFORM", Value: *tektonapi.NewStructuredValues("$(params.PLATFORM)")})
+				dockerPipelineObject.Spec.Params = append(dockerPipelineObject.PipelineSpec().Params, tektonapi.ParamSpec{Name: "PLATFORM", Default: tektonapi.NewStructuredValues(platformType)})
+				for i, param := range dockerPipelineObject.Spec.Params {
+					if param.Name == "skip-checks" {
+						skipCheck := &dockerPipelineObject.Spec.Params[i]
+						skipCheck.Default = tektonapi.NewStructuredValues("true")
+					}
+				}
+				dockerPipelineObject.Spec.Workspaces = append(dockerPipelineObject.PipelineSpec().Workspaces, tektonapi.PipelineWorkspaceDeclaration{Name: "workspace-amd64"})
+
+	//			dockerPipelineObject.Spec.Params = append(dockerPipelineObject.PipelineSpec().Params, tektonapi.ParamSpec{Name: "PLATFORM", Default: tektonapi.NewStructuredValues(platformType)})
+
+				dockerPipelineObject.Name = "buildah-remote-pipeline"
+				break
+			}
+		}
+		newTaskRef := &tektonapi.TaskRef{
+			ResolverRef: tektonapi.ResolverRef{
+				Params:	[]tektonapi.Param{
+					{
+						Name: "name",
+						Value: *tektonapi.NewStructuredValues("build-image-manifest"),
+					},
+					{
+						Name: "bundle",
+						Value: *tektonapi.NewStructuredValues("quay.io/redhat-appstudio-tekton-catalog/task-build-image-manifest:0.1@sha256:e064b63b2311d23d6bf6538347cb4eb18c980d61883f48149bc9c728f76b276c"),
+					},
+					{
+						Name: "kind",
+						Value: *tektonapi.NewStructuredValues("task"),
+					},
+				},
+				Resolver: "bundles",
+			},
+		}
+		newTask := &tektonapi.PipelineTask{
+			Name: "build-container-manifest",
+			RunAfter: []string{"build-container"},
+			//RunAfter: []string{"build-container", "build-container-amd64"},
+			TaskRef: newTaskRef,
+			Params: []tektonapi.Param{
+				{
+					Name: "IMAGE",
+					Value: *tektonapi.NewStructuredValues("$(params.output-image)"),
+				},
+				{
+					Name: "COMMIT_SHA",
+					Value: *tektonapi.NewStructuredValues("$(tasks.clone-repository.results.commit)"),
+				},
+				{
+					Name: "IMAGES",
+					Value: tektonapi.ParamValue{
+						Type: tektonapi.ParamTypeArray,
+						ArrayVal: []string{
+							"$(tasks.build-container.results.IMAGE_URL)@$(tasks.build-container.results.IMAGE_DIGEST)",
+//							"$(tasks.build-container-amd64.results.IMAGE_URL)@$(tasks.build-container-amd64.results.IMAGE_DIGEST)",
+						},
+					},
+				},
+			},
+			When: tektonapi.WhenExpressions{{
+				Input: "$(tasks.init.results.build)",
+				Operator: selection.In,
+				Values:   []string{"true"},
+			}},
+		}
+
+		cloneTaskRef := &tektonapi.TaskRef{
+			ResolverRef: tektonapi.ResolverRef{
+				Params:	[]tektonapi.Param{
+					{
+						Name: "name",
+						Value: *tektonapi.NewStructuredValues("git-clone"),
+					},
+					{
+						Name: "bundle",
+						Value: *tektonapi.NewStructuredValues("quay.io/redhat-appstudio-tekton-catalog/task-git-clone:0.1@sha256:30709df067659a407968154fd39e99763823d8ecfc6b5cd00a55b68818ec94ba"),
+					},
+					{
+						Name: "kind",
+						Value: *tektonapi.NewStructuredValues("task"),
+					},
+				},
+				Resolver: "bundles",
+			},
+		}
+		cloneTask := &tektonapi.PipelineTask{
+			Name: "clone-repository-amd64",
+			RunAfter: []string{"init"},
+			TaskRef: cloneTaskRef,
+			Params: []tektonapi.Param{
+				{
+					Name: "url",
+					Value: *tektonapi.NewStructuredValues("$(params.git-url)"),
+				},
+				{
+					Name: "revision",
+					Value: *tektonapi.NewStructuredValues("$(params.revision)"),
+				},
+			},
+			When: tektonapi.WhenExpressions{{
+				Input: "$(tasks.init.results.build)",
+				Operator: selection.In,
+				Values:   []string{"true"},
+			}},
+			Workspaces: []tektonapi.WorkspacePipelineTaskBinding{
+				{
+					Name: "output",
+					Workspace: "workspace-amd64",
+				},
+				{
+					Name: "basic-auth",
+					Workspace: "git-auth",
+				},
+			},
+		}
+
+		buildTaskRef := &tektonapi.TaskRef{
+			ResolverRef: tektonapi.ResolverRef{
+				Params:	[]tektonapi.Param{
+					{
+						Name: "name",
+						Value: *tektonapi.NewStructuredValues("buildah"),
+					},
+					{
+						Name: "bundle",
+						Value: *tektonapi.NewStructuredValues("quay.io/redhat-appstudio-tekton-catalog/task-buildah:0.1@sha256:7e5f19d3aa233b9becf90d1ca01697486dc1acb1f1d6d2a0b8d1a1cc07c66249"),
+					},
+					{
+						Name: "kind",
+						Value: *tektonapi.NewStructuredValues("task"),
+					},
+				},
+				Resolver: "bundles",
+			},
+		}
+		// need modify
+		_ = &tektonapi.PipelineTask{
+			Name: "build-container-amd64",
+			RunAfter: []string{"clone-repository-amd64"},
+			TaskRef: buildTaskRef,
+			Params: []tektonapi.Param{
+				{
+					Name: "IMAGE",
+					Value: *tektonapi.NewStructuredValues("$(params.output-image)-amd64"),
+				},
+				{
+					Name: "DOCKERFILE",
+					Value: *tektonapi.NewStructuredValues("$(params.dockerfile)"),
+				},
+				{
+					Name: "CONTEXT",
+					Value: *tektonapi.NewStructuredValues("$(params.path-context"),
+				},
+				{
+					Name: "HERMETIC",
+					Value: *tektonapi.NewStructuredValues("$(params.hermetic)"),
+				},
+				{
+					Name: "PREFETCH_INPUT",
+					Value: *tektonapi.NewStructuredValues("$(params.prefetch-input"),
+				},
+				{
+					Name: "IMAGE_EXPIRES_AFTER",
+					Value: *tektonapi.NewStructuredValues("$(params.image-expires-after)"),
+				},
+				{
+					Name: "COMMIT_SHA",
+					Value: *tektonapi.NewStructuredValues("$(tasks.clone-repository-amd64.results.commit"),
+				},
+				{
+					Name: "BUILD_ARGS_FILE",
+					Value: *tektonapi.NewStructuredValues("$(params.build-args-file)"),
+				},
+			},
+			When: tektonapi.WhenExpressions{{
+				Input: "$(tasks.init.results.build)",
+				Operator: selection.In,
+				Values:   []string{"true"},
+			}},
+			Workspaces: []tektonapi.WorkspacePipelineTaskBinding{
+				{
+					Name: "source",
+					Workspace: "workspace-amd64",
+				},
+			},
+		}
+
+		dockerPipelineObject.Spec.Tasks = append(dockerPipelineObject.PipelineSpec().Tasks, *cloneTask)
+		//dockerPipelineObject.Spec.Tasks = append(dockerPipelineObject.PipelineSpec().Tasks, *buildTask)
+		dockerPipelineObject.Spec.Tasks = append(dockerPipelineObject.PipelineSpec().Tasks, *newTask)
+		if newPipelineYaml, err = yaml.Marshal(dockerPipelineObject); err != nil {
+			return fmt.Errorf("error when marshalling a new pipeline to YAML: %v", err)
+		}
+
+		keychain := authn.NewMultiKeychain(authn.DefaultKeychain)
+		authOption := remoteimg.WithAuthFromKeychain(keychain)
+
+		if err = tekton.BuildAndPushTektonBundle(newPipelineYaml, newRemotePipeline, authOption); err != nil {
+			return fmt.Errorf("error when building/pushing a tekton pipeline bundle: %v", err)
+		}
+		platform := strings.ToUpper(strings.Split(platformType, "/")[1])
+		klog.Infof("SETTING ENV VAR %s to value %s\n", constants.CUSTOM_BUILDAH_REMOTE_PIPELINE_BUILD_BUNDLE_ENV+"_"+platform, newRemotePipeline.String())
+		os.Setenv(constants.CUSTOM_BUILDAH_REMOTE_PIPELINE_BUILD_BUNDLE_ENV+"_"+platform, newRemotePipeline.String())
+
+	return nil
+}
+
 func SetupSourceBuild() {
 	var err error
 	var defaultBundleRef string
@@ -757,7 +1003,20 @@ func BootstrapCluster() error {
 		return fmt.Errorf("failed to initialize installation controller: %+v", err)
 	}
 
-	return ic.InstallAppStudioPreviewMode()
+	if err := ic.InstallAppStudioPreviewMode(); err != nil {
+		return err
+	}
+
+	if os.Getenv("CI") == "true" && requiresSprayProxyRegistering {
+		err := registerPacServer()
+		if err != nil {
+			os.Setenv(constants.SKIP_PAC_TESTS_ENV, "true")
+			if alertErr := HandleErrorWithAlert(fmt.Errorf("failed to register SprayProxy: %+v", err), slack.ErrorSeverityLevelError); alertErr != nil {
+				return alertErr
+			}
+		}
+	}
+	return nil
 }
 
 func isPRPairingRequired(repoForPairing string) bool {
@@ -1032,17 +1291,20 @@ func registerPacServer() error {
 }
 
 func unregisterPacServer() error {
-	if sprayProxyConfig == nil {
-		return fmt.Errorf("SprayProxy config is empty")
+	var err error
+	var pacHost string
+	sprayProxyConfig, err = newSprayProxy()
+	if err != nil {
+		return fmt.Errorf("failed to set up SprayProxy credentials: %+v", err)
 	}
 	// for debugging purposes
 	klog.Infof("Before unregistering pac server...")
-	err := printRegisteredPacServers()
+	err = printRegisteredPacServers()
 	if err != nil {
 		klog.Error(err)
 	}
 
-	pacHost, err := sprayproxy.GetPaCHost()
+	pacHost, err = sprayproxy.GetPaCHost()
 	if err != nil {
 		return fmt.Errorf("failed to get PaC host: %+v", err)
 	}
@@ -1242,3 +1504,4 @@ func isValidPacHost(server string) bool {
 	_, err := httpClient.Get(strings.TrimSpace(server))
 	return err == nil
 }
+
