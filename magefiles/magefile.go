@@ -614,11 +614,11 @@ func SetupMultiPlatformTests() error {
 }
 
 func SetupMultiArchTests() error {
-	klog.Infof("going to create new Tekton bundle remote-build for the purpose of testing multi-platform-controller PR")
+	klog.Infof("going to create new Tekton bundle remote-build for the purpose of testing multi-arch PR")
 	var err error
 	var defaultBundleRef string
 	var tektonObj runtime.Object
-
+	//?for testing	
 	platformType := "linux/arm64"
 
 	tag := fmt.Sprintf("%d-%s", time.Now().Unix(), util.GenerateRandomString(4))
@@ -674,8 +674,6 @@ func SetupMultiArchTests() error {
 					}
 				}
 				dockerPipelineObject.Spec.Workspaces = append(dockerPipelineObject.PipelineSpec().Workspaces, tektonapi.PipelineWorkspaceDeclaration{Name: "workspace-amd64"})
-
-	//			dockerPipelineObject.Spec.Params = append(dockerPipelineObject.PipelineSpec().Params, tektonapi.ParamSpec{Name: "PLATFORM", Default: tektonapi.NewStructuredValues(platformType)})
 
 				dockerPipelineObject.Name = "buildah-remote-pipeline"
 				break
@@ -801,7 +799,8 @@ func SetupMultiArchTests() error {
 				Resolver: "bundles",
 			},
 		}
-		// need modify
+
+//		buildTask := &tektonapi.PipelineTask{
 		_ = &tektonapi.PipelineTask{
 			Name: "build-container-amd64",
 			RunAfter: []string{"clone-repository-amd64"},

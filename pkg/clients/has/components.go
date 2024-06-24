@@ -62,13 +62,24 @@ func (h *HasController) GetComponentByApplicationName(applicationName string, na
 	return &appservice.Component{}, fmt.Errorf("no component found %s", utils.GetAdditionalInfo(applicationName, namespace))
 }
 
-// GetComponentPipeline returns the pipeline for a given component labels
+// GetComponentPipeline returns first pipeline run for a given component labels
 func (h *HasController) GetComponentPipelineRun(componentName string, applicationName string, namespace, sha string) (*pipeline.PipelineRun, error) {
 	return h.GetComponentPipelineRunWithType(componentName, applicationName, namespace, "", sha)
 }
 
-// GetComponentPipeline returns the pipeline for a given component labels with pipeline type within label "pipelines.appstudio.openshift.io/type" ("build", "test")
+// GetComponentPipelineRunWithType returns first pipeline run for a given component labels with pipeline type within label "pipelines.appstudio.openshift.io/type" ("build", "test")
 func (h *HasController) GetComponentPipelineRunWithType(componentName string, applicationName string, namespace, pipelineType string, sha string) (*pipeline.PipelineRun, error) {
+    prs, err := h.GetComponentPipelineRunsWithType(componentName, applicationName, namespace, "", sha)
+    if err != nil {
+        return nil, err
+    } else {
+        prsVal := *prs
+        return &prsVal[0], nil
+    }
+}
+
+// GetComponentPipelineRunsWithType returns all pipeline runs for a given component labels with pipeline type within label "pipelines.appstudio.openshift.io/type" ("build", "test")
+func (h *HasController) GetComponentPipelineRunsWithType(componentName string, applicationName string, namespace, pipelineType string, sha string) (*[]pipeline.PipelineRun, error) {
 	pipelineRunLabels := map[string]string{"appstudio.openshift.io/component": componentName, "appstudio.openshift.io/application": applicationName}
 	if pipelineType != "" {
 		pipelineRunLabels["pipelines.appstudio.openshift.io/type"] = pipelineType
@@ -91,7 +102,7 @@ func (h *HasController) GetComponentPipelineRunWithType(componentName string, ap
 	}
 
 	if len(list.Items) > 0 {
-		return &list.Items[0], nil
+		return &list.Items, nil
 	}
 
 	return nil, fmt.Errorf("no pipelinerun found for component %s", componentName)
@@ -169,6 +180,9 @@ func (h *HasController) WaitForComponentPipelineToBeFinished(component *appservi
 		})
 
 		if err != nil {
+			if pr == nil {
+				return fmt.Errorf("PipelineRun cannot be created for the Component %s/%s", component.GetNamespace(), component.GetName())
+			}
 			GinkgoWriter.Printf("attempt %d/%d: PipelineRun %q failed: %+v", attempts, r.Retries+1, pr.GetName(), err)
 			// CouldntGetTask: Retry the PipelineRun only in case we hit the known issue https://issues.redhat.com/browse/SRVKP-2749
 			// TaskRunImagePullFailed: Retry in case of https://issues.redhat.com/browse/RHTAPBUGS-985 and https://github.com/tektoncd/pipeline/issues/7184
@@ -316,7 +330,7 @@ func (h *HasController) DeleteComponent(name string, namespace string, reportErr
 func (h *HasController) DeleteAllComponentsInASpecificNamespace(namespace string, timeout time.Duration) error {
 	// temporary logs
 	start := time.Now()
-	GinkgoWriter.Println("Start to delete all components in namespace '%s' at %s", namespace, start.String())
+	GinkgoWriter.Printf("Start to delete all components in namespace '%s' at %s\n", namespace, start.String())
 
 	if err := h.KubeRest().DeleteAllOf(context.Background(), &appservice.Component{}, rclient.InNamespace(namespace)); err != nil {
 		return fmt.Errorf("error deleting components from the namespace %s: %+v", namespace, err)
@@ -333,7 +347,7 @@ func (h *HasController) DeleteAllComponentsInASpecificNamespace(namespace string
 
 	// temporary logs
 	deletionTime := time.Since(start).Minutes()
-	GinkgoWriter.Println("Finish to delete all components in namespace '%s' at %s. It took '%f' minutes", namespace, time.Now().Format(time.RFC3339), deletionTime)
+	GinkgoWriter.Printf("Finish to delete all components in namespace '%s' at %s. It took '%f' minutes\n", namespace, time.Now().Format(time.RFC3339), deletionTime)
 
 	return err
 }
