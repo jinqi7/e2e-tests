@@ -17,6 +17,8 @@ const (
 	HacbsReleaseTestsTokenSecret         string = "redhat-appstudio-registry-pull-secret"
 	PublicSecretNameAuth                 string = "cosign-public-key"
 	ReleasePipelineServiceAccountDefault string = "release-service-account"
+	CgwSecretName                        string = "publish-to-cgw-secret"
+	ExodusStageSecretName                string = "exodus-stage-secret"
 
 	SourceReleasePlanName          string = "source-releaseplan"
 	SecondReleasePlanName          string = "the-second-releaseplan"
@@ -59,5 +61,5 @@ var ManagednamespaceSecret = []corev1.ObjectReference{
 // Pipelines variables
 var (
 	RelSvcCatalogURL      string = utils.GetEnv("RELEASE_SERVICE_CATALOG_URL", "https://github.com/konflux-ci/release-service-catalog")
-	RelSvcCatalogRevision string = utils.GetEnv("RELEASE_SERVICE_CATALOG_REVISION", "staging")
+	RelSvcCatalogRevision string = utils.GetEnv("RELEASE_SERVICE_CATALOG_REVISION", "development")
 )
