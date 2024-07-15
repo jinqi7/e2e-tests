@@ -297,7 +297,7 @@ func (ci CI) UnregisterSprayproxy() {
 }
 
 func RunE2ETests() error {
-	labelFilter := utils.GetEnv("E2E_TEST_SUITE_LABEL", "!upgrade-create && !upgrade-verify && !upgrade-cleanup && !release-pipelines")
+	labelFilter := utils.GetEnv("E2E_TEST_SUITE_LABEL", "!upgrade-create && !upgrade-verify && !upgrade-cleanup && release-pipelines")
 	return runTests(labelFilter, "e2e-report.xml")
 }
 
