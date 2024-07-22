@@ -9,6 +9,7 @@ var MageEngine = rulesengine.RuleEngine{
 	"tests": {
 		"e2e-repo":          repos.E2ETestRulesCatalog,
 		"infra-deployments": repos.InfraDeploymentsTestRulesCatalog,
+		"release-pipelines": repos.ReleaseCatalogTestRulesCatalog,
 	},
 	"demo": {
 		"local-workflow": repos.DemoCatalog,

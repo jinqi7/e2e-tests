@@ -2,7 +2,6 @@ package repos
 
 import (
 	"strings"
-
 	"github.com/konflux-ci/e2e-tests/magefiles/rulesengine"
 )
 
