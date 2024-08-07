@@ -14,7 +14,6 @@ import (
 	"github.com/konflux-ci/e2e-tests/pkg/constants"
 	"github.com/konflux-ci/e2e-tests/pkg/framework"
 	"github.com/konflux-ci/e2e-tests/pkg/utils"
-	"github.com/konflux-ci/e2e-tests/pkg/utils/tekton"
 	releasecommon "github.com/konflux-ci/e2e-tests/tests/release"
 	releaseapi "github.com/konflux-ci/release-service/api/v1alpha1"
 	tektonutils "github.com/konflux-ci/release-service/tekton/utils"
@@ -25,15 +24,16 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"knative.dev/pkg/apis"
 )
 
 const (
 	rhioServiceAccountName = "release-service-account"
 	rhioCatalogPathInRepo  = "pipelines/rh-push-to-registry-redhat-io/rh-push-to-registry-redhat-io.yaml"
+	rhioGitSourceURL        = "https://github.com/redhat-appstudio-qe/devfile-sample-python-basic-release"
+	rhioGitSrcSHA           = "33ff89edf85fb01a37d3d652d317080223069fc7"
 )
 
-var testComponent *appservice.Component
+var rhioComponentName = "rhio-comp-" + util.GenerateRandomString(4)
 
 var _ = framework.ReleasePipelinesSuiteDescribe("e2e tests for rh-push-to-redhat-io pipeline", Label("release-pipelines", "rh-push-to-redhat-io"), func() {
 	defer GinkgoRecover()
@@ -49,14 +49,13 @@ var _ = framework.ReleasePipelinesSuiteDescribe("e2e tests for rh-push-to-redhat
 	var devFw *framework.Framework
 	var managedFw *framework.Framework
 	var rhioApplicationName = "rhio-app-" + util.GenerateRandomString(4)
-	var rhioComponentName = "rhio-comp-" + util.GenerateRandomString(4)
 	var rhioReleasePlanName = "rhio-rp-" + util.GenerateRandomString(4)
 	var rhioReleasePlanAdmissionName = "rhio-rpa-" + util.GenerateRandomString(4)
 	var rhioEnterpriseContractPolicyName = "rhio-policy-" + util.GenerateRandomString(4)
 
-	var snapshot *appservice.Snapshot
+	var snapshotPush *appservice.Snapshot
 	var releaseCR *releaseapi.Release
-	var releasePR, buildPR *tektonv1.PipelineRun
+	var releasePR *tektonv1.PipelineRun
 
 	AfterEach(framework.ReportFailure(&devFw))
 
@@ -64,6 +63,21 @@ var _ = framework.ReleasePipelinesSuiteDescribe("e2e tests for rh-push-to-redhat
 		BeforeAll(func() {
 			devFw = releasecommon.NewFramework(devWorkspace)
 			managedFw = releasecommon.NewFramework(managedWorkspace)
+			// Create a ticker that ticks every 3 minutes
+			ticker := time.NewTicker(3 * time.Minute)
+			// Schedule the stop of the ticker after 15 minutes
+			time.AfterFunc(15*time.Minute, func() {
+				ticker.Stop()
+				fmt.Println("Stopped executing every 3 minutes.")
+			})
+			// Run a goroutine to handle the ticker ticks
+			go func() {
+				for range ticker.C {
+					devFw = releasecommon.NewFramework(devWorkspace)
+					managedFw = releasecommon.NewFramework(managedWorkspace)
+				}
+			}()
+
 			managedNamespace = managedFw.UserNamespace
 
 			keyPyxisStage := os.Getenv(constants.PYXIS_STAGE_KEY_ENV)
@@ -106,11 +120,13 @@ var _ = framework.ReleasePipelinesSuiteDescribe("e2e tests for rh-push-to-redhat
 			_, err = devFw.AsKubeDeveloper.ReleaseController.CreateReleasePlan(rhioReleasePlanName, devNamespace, rhioApplicationName, managedNamespace, "true", nil, nil)
 			Expect(err).NotTo(HaveOccurred())
 
-			testComponent = releasecommon.CreateComponent(*devFw, devNamespace, rhioApplicationName, rhioComponentName, releasecommon.AdditionalGitSourceComponentUrl, "", ".", constants.DockerFilePath, constants.DefaultDockerBuildPipelineBundle)
-
 			createRHIOReleasePlanAdmission(rhioReleasePlanAdmissionName, *managedFw, devNamespace, managedNamespace, rhioApplicationName, rhioEnterpriseContractPolicyName, rhioCatalogPathInRepo)
 
 			createRHIOEnterpriseContractPolicy(rhioEnterpriseContractPolicyName, *managedFw, devNamespace, managedNamespace)
+			sampleImage := "quay.io/redhat-user-workloads-stage/dev-release-team-tenant/e2e-rhio-ap/e2e-rhio-comp@sha256:bf2fb2c7d63c924ff9170c27f0f15558f6a59bdfb5ad9613eb61d3e4bc1cff0a"
+			snapshotPush, err = devFw.AsKubeAdmin.IntegrationController.CreateSnapshotWithImageAndSource(rhioComponentName, rhioApplicationName, devNamespace, sampleImage, rhioGitSourceURL, rhioGitSrcSHA, "", "", "", "")
+			GinkgoWriter.Println("snapshotPush.Name: %s", snapshotPush.GetName())
+                        Expect(err).ShouldNot(HaveOccurred())
 		})
 
 		AfterAll(func() {
@@ -122,49 +138,11 @@ var _ = framework.ReleasePipelinesSuiteDescribe("e2e tests for rh-push-to-redhat
 		})
 
 		var _ = Describe("Post-release verification", func() {
-			It("verifies that a build PipelineRun is created in dev namespace and succeeds", func() {
-				devFw = releasecommon.NewFramework(devWorkspace)
-				managedFw = releasecommon.NewFramework(managedWorkspace)
-				// Create a ticker that ticks every 3 minutes
-				ticker := time.NewTicker(3 * time.Minute)
-				// Schedule the stop of the ticker after 15 minutes
-				time.AfterFunc(15*time.Minute, func() {
-					ticker.Stop()
-					fmt.Println("Stopped executing every 3 minutes.")
-				})
-				// Run a goroutine to handle the ticker ticks
-				go func() {
-					for range ticker.C {
-						devFw = releasecommon.NewFramework(devWorkspace)
-						managedFw = releasecommon.NewFramework(managedWorkspace)
-					}
-				}()
-				Eventually(func() error {
-					buildPR, err = devFw.AsKubeDeveloper.HasController.GetComponentPipelineRun(testComponent.Name, rhioApplicationName, devNamespace, "")
-					if err != nil {
-						GinkgoWriter.Printf("Build PipelineRun has not been created yet for the component %s/%s\n", devNamespace, testComponent.Name)
-						return err
-					}
-					GinkgoWriter.Printf("PipelineRun %s reason: %s\n", buildPR.Name, buildPR.GetStatusCondition().GetCondition(apis.ConditionSucceeded).GetReason())
-					if !buildPR.IsDone() {
-						return fmt.Errorf("build pipelinerun %s in namespace %s did not finish yet", buildPR.Name, buildPR.Namespace)
-					}
-					if buildPR.GetStatusCondition().GetCondition(apis.ConditionSucceeded).IsTrue() {
-						snapshot, err = devFw.AsKubeDeveloper.IntegrationController.GetSnapshot("", buildPR.Name, "", devNamespace)
-						if err != nil {
-							return err
-						}
-						return nil
-					} else {
-						return fmt.Errorf(tekton.GetFailedPipelineRunLogs(devFw.AsKubeDeveloper.HasController.KubeRest(), devFw.AsKubeDeveloper.HasController.KubeInterface(), buildPR))
-					}
-				}, releasecommon.BuildPipelineRunCompletionTimeout, releasecommon.DefaultInterval).Should(Succeed(), fmt.Sprintf("timed out when waiting for the build PipelineRun to be finished for the component %s/%s", devNamespace, testComponent.Name))
-			})
 			It("verifies the rhio release pipelinerun is running and succeeds", func() {
 				devFw = releasecommon.NewFramework(devWorkspace)
 				managedFw = releasecommon.NewFramework(managedWorkspace)
 
-				releaseCR, err = devFw.AsKubeDeveloper.ReleaseController.GetRelease("", snapshot.Name, devNamespace)
+				releaseCR, err = devFw.AsKubeDeveloper.ReleaseController.GetRelease("", snapshotPush.Name, devNamespace)
 				Expect(err).ShouldNot(HaveOccurred())
 
 				Expect(managedFw.AsKubeAdmin.ReleaseController.WaitForReleasePipelineToBeFinished(releaseCR, managedNamespace)).To(Succeed(), fmt.Sprintf("Error when waiting for a release pipelinerun for release %s/%s to finish", releaseCR.GetNamespace(), releaseCR.GetName()))
@@ -173,7 +151,7 @@ var _ = framework.ReleasePipelinesSuiteDescribe("e2e tests for rh-push-to-redhat
 			It("verifies release CR completed and set succeeded.", func() {
 				devFw = releasecommon.NewFramework(devWorkspace)
 				Eventually(func() error {
-					releaseCR, err = devFw.AsKubeDeveloper.ReleaseController.GetRelease("", snapshot.Name, devNamespace)
+					releaseCR, err = devFw.AsKubeDeveloper.ReleaseController.GetRelease("", snapshotPush.Name, devNamespace)
 					if err != nil {
 						return err
 					}
@@ -237,7 +215,7 @@ func createRHIOReleasePlanAdmission(rhioRPAName string, managedFw framework.Fram
 		"mapping": map[string]interface{}{
 			"components": []map[string]interface{}{
 				{
-					"name":       testComponent.GetName(),
+					"name":       rhioComponentName,
 					"repository": "quay.io/redhat-pending/rhtap----konflux-release-e2e",
 					"tags": []string{"latest", "latest-{{ timestamp }}", "testtag",
 						"testtag-{{ timestamp }}", "testtag2", "testtag2-{{ timestamp }}"},

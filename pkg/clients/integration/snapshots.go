@@ -21,6 +21,44 @@ import (
 // SnapshotTestsStatusAnnotation is annotation in snapshot where integration test results are stored
 const SnapshotTestsStatusAnnotation = "test.appstudio.openshift.io/status"
 
+// CreateSnapshotWithImageAndSource creates a snapshot having two images and sources.
+func (i *IntegrationController) CreateSnapshotWithImageAndSource(componentName, applicationName, namespace, containerImage, gitSourceURL, gitSourceRevision, componentName2, containerImage2, gitSourceURL2, gitSourceRevision2 string) (*appstudioApi.Snapshot, error) {
+	snapshotComponents := []appstudioApi.SnapshotComponent{
+		{
+			Name:           componentName,
+			ContainerImage: containerImage,
+			Source:         appstudioApi.ComponentSource{
+				appstudioApi.ComponentSourceUnion{
+					GitSource: &appstudioApi.GitSource{
+						Revision: gitSourceRevision,
+						URL: gitSourceURL,
+					},
+				},
+			},
+		},
+	}
+
+	if componentName2 != "" && containerImage2 != "" {
+		newSnapshotComponent := appstudioApi.SnapshotComponent{
+			Name:           componentName2,
+			ContainerImage: containerImage2,
+			Source:         appstudioApi.ComponentSource{
+				appstudioApi.ComponentSourceUnion{
+					GitSource: &appstudioApi.GitSource{
+						Revision: gitSourceRevision2,
+						URL: gitSourceURL2,
+					},
+				},
+			},
+		}
+		snapshotComponents = append(snapshotComponents, newSnapshotComponent)
+	}
+
+	snapshotName := "snapshot-sample-" + util.GenerateRandomString(4)
+
+	return i.CreateSnapshotWithComponents(snapshotName, componentName, applicationName, namespace, snapshotComponents)
+}
+
 // CreateSnapshotWithComponents creates a Snapshot using the given parameters.
 func (i *IntegrationController) CreateSnapshotWithComponents(snapshotName, componentName, applicationName, namespace string, snapshotComponents []appstudioApi.SnapshotComponent) (*appstudioApi.Snapshot, error) {
 	snapshot := &appstudioApi.Snapshot{

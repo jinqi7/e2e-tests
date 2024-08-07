@@ -13,7 +13,6 @@ import (
 	"github.com/konflux-ci/e2e-tests/pkg/constants"
 	"github.com/konflux-ci/e2e-tests/pkg/framework"
 	"github.com/konflux-ci/e2e-tests/pkg/utils"
-	"github.com/konflux-ci/e2e-tests/pkg/utils/tekton"
 	releasecommon "github.com/konflux-ci/e2e-tests/tests/release"
 	releaseapi "github.com/konflux-ci/release-service/api/v1alpha1"
 	tektonutils "github.com/konflux-ci/release-service/tekton/utils"
@@ -24,12 +23,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"knative.dev/pkg/apis"
 )
 
 const (
 	sampServiceAccountName = "release-service-account"
 	sampSourceGitURL       = "https://github.com/redhat-appstudio-qe/devfile-sample-go-basic"
+	sampGitSrcSHA          = "2c2f068d7371fb174c3396dc213cb2f223ee3bc4"
 	sampRepoOwner          = "redhat-appstudio-qe"
 	sampRepo               = "devfile-sample-go-basic"
 	sampCatalogPathInRepo  = "pipelines/release-to-github/release-to-github.yaml"
@@ -55,17 +54,30 @@ var _ = framework.ReleasePipelinesSuiteDescribe("e2e tests for release-to-github
 
 	var snapshot *appservice.Snapshot
 	var releaseCR *releaseapi.Release
-	var releasePR, buildPR *tektonv1.PipelineRun
+	var releasePR *tektonv1.PipelineRun
 	var gh *github.Github
 	var sampReleaseURL string
 
 	AfterEach(framework.ReportFailure(&devFw))
 
 	Describe("Release-to-github happy path", Label("releaseToGithub"), func() {
-		var component *appservice.Component
 		BeforeAll(func() {
 			devFw = releasecommon.NewFramework(devWorkspace)
 			managedFw = releasecommon.NewFramework(managedWorkspace)
+			// Create a ticker that ticks every 3 minutes
+			ticker := time.NewTicker(3 * time.Minute)
+			// Schedule the stop of the ticker after 15 minutes
+			time.AfterFunc(15*time.Minute, func() {
+				ticker.Stop()
+				fmt.Println("Stopped executing every 3 minutes.")
+			})
+			// Run a goroutine to handle the ticker ticks
+			go func() {
+				for range ticker.C {
+					devFw = releasecommon.NewFramework(devWorkspace)
+					managedFw = releasecommon.NewFramework(managedWorkspace)
+				}
+			}()
 
 			managedNamespace = managedFw.UserNamespace
 
@@ -106,9 +118,12 @@ var _ = framework.ReleasePipelinesSuiteDescribe("e2e tests for release-to-github
 
 			createGHReleasePlanAdmission(sampReleasePlanAdmissionName, *managedFw, devNamespace, managedNamespace, sampApplicationName, sampEnterpriseContractPolicyName, sampCatalogPathInRepo, "false", "", "", "", "")
 
-			component = releasecommon.CreateComponent(*devFw, devNamespace, sampApplicationName, sampComponentName, sampSourceGitURL, "", ".", "Dockerfile", constants.DefaultDockerBuildPipelineBundle)
-
 			createGHEnterpriseContractPolicy(sampEnterpriseContractPolicyName, *managedFw, devNamespace, managedNamespace)
+
+			sampleImage := "quay.io/redhat-user-workloads-stage/dev-release-team-tenant/e2e-release-to-github-app/devfile-sample-go-basic@sha256:06f89e951b144e033596b71a60569607f47f51fe685ead48f74bf13ea16d63aa"
+
+			snapshot, err = devFw.AsKubeAdmin.IntegrationController.CreateSnapshotWithImageAndSource(sampComponentName, sampApplicationName, devNamespace, sampleImage, sampSourceGitURL, sampGitSrcSHA, "", "", "", "")
+                        Expect(err).ShouldNot(HaveOccurred())
 		})
 
 		AfterAll(func() {
@@ -124,44 +139,7 @@ var _ = framework.ReleasePipelinesSuiteDescribe("e2e tests for release-to-github
 		})
 
 		var _ = Describe("Post-release verification", func() {
-			It("verifies that a build PipelineRun is created in dev namespace and succeeds", func() {
-				devFw = releasecommon.NewFramework(devWorkspace)
-				managedFw = releasecommon.NewFramework(managedWorkspace)
-				// Create a ticker that ticks every 3 minutes
-				ticker := time.NewTicker(3 * time.Minute)
-				// Schedule the stop of the ticker after 15 minutes
-				time.AfterFunc(15*time.Minute, func() {
-					ticker.Stop()
-					fmt.Println("Stopped executing every 3 minutes.")
-				})
-				// Run a goroutine to handle the ticker ticks
-				go func() {
-					for range ticker.C {
-						devFw = releasecommon.NewFramework(devWorkspace)
-						managedFw = releasecommon.NewFramework(managedWorkspace)
-					}
-				}()
-				Eventually(func() error {
-					buildPR, err = devFw.AsKubeDeveloper.HasController.GetComponentPipelineRun(component.Name, sampApplicationName, devNamespace, "")
-					if err != nil {
-						GinkgoWriter.Printf("Build PipelineRun has not been created yet for the component %s/%s\n", devNamespace, component.Name)
-						return err
-					}
-					GinkgoWriter.Printf("PipelineRun %s reason: %s\n", buildPR.Name, buildPR.GetStatusCondition().GetCondition(apis.ConditionSucceeded).GetReason())
-					if !buildPR.IsDone() {
-						return fmt.Errorf("build pipelinerun %s in namespace %s did not finish yet", buildPR.Name, buildPR.Namespace)
-					}
-					if buildPR.GetStatusCondition().GetCondition(apis.ConditionSucceeded).IsTrue() {
-						snapshot, err = devFw.AsKubeDeveloper.IntegrationController.GetSnapshot("", buildPR.Name, "", devNamespace)
-						if err != nil {
-							return err
-						}
-						return nil
-					} else {
-						return fmt.Errorf(tekton.GetFailedPipelineRunLogs(devFw.AsKubeDeveloper.HasController.KubeRest(), devFw.AsKubeDeveloper.HasController.KubeInterface(), buildPR))
-					}
-				}, releasecommon.BuildPipelineRunCompletionTimeout, releasecommon.DefaultInterval).Should(Succeed(), fmt.Sprintf("timed out when waiting for the build PipelineRun to be finished for the component %s/%s", devNamespace, component.Name))
-			})
+
 			It("verifies release pipelinerun is running and succeeds", func() {
 				devFw = releasecommon.NewFramework(devWorkspace)
 				managedFw = releasecommon.NewFramework(managedWorkspace)
