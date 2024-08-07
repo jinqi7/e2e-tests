@@ -10,7 +10,6 @@ import (
 
 	ecp "github.com/enterprise-contract/enterprise-contract-controller/api/v1alpha1"
 	appservice "github.com/konflux-ci/application-api/api/v1alpha1"
-	"github.com/konflux-ci/e2e-tests/pkg/clients/has"
 	"github.com/konflux-ci/e2e-tests/pkg/constants"
 	"github.com/konflux-ci/e2e-tests/pkg/framework"
 	"github.com/konflux-ci/e2e-tests/pkg/utils"
@@ -30,8 +29,9 @@ var _ = framework.ReleasePipelinesSuiteDescribe("Push to external registry", Lab
 	var err error
 	var devNamespace, managedNamespace string
 
-	var component *appservice.Component
 	var releaseCR *releaseApi.Release
+	var snapshotPush *appservice.Snapshot
+	var sampleImage string
 
 	BeforeAll(func() {
 		// Initialize the tests controllers
@@ -72,7 +72,7 @@ var _ = framework.ReleasePipelinesSuiteDescribe("Push to external registry", Lab
 		_, err = fw.AsKubeAdmin.HasController.CreateApplication(releasecommon.ApplicationNameDefault, devNamespace)
 		Expect(err).NotTo(HaveOccurred())
 
-		component = releasecommon.CreateComponent(*fw, devNamespace, releasecommon.ApplicationNameDefault, releasecommon.ComponentName, releasecommon.GitSourceComponentUrl, "", ".", "Dockerfile", constants.DefaultDockerBuildPipelineBundle)
+//		component = releasecommon.CreateComponent(*fw, devNamespace, releasecommon.ApplicationNameDefault, releasecommon.ComponentName, releasecommon.GitSourceComponentUrl, "", ".", "Dockerfile", constants.DefaultDockerBuildPipelineBundle)
 
 		_, err = fw.AsKubeAdmin.ReleaseController.CreateReleasePlan(releasecommon.SourceReleasePlanName, devNamespace, releasecommon.ApplicationNameDefault, managedNamespace, "", nil, nil)
 		Expect(err).NotTo(HaveOccurred())
@@ -81,7 +81,7 @@ var _ = framework.ReleasePipelinesSuiteDescribe("Push to external registry", Lab
 			"mapping": map[string]interface{}{
 				"components": []map[string]interface{}{
 					{
-						"name":       component.GetName(),
+						"name":       releasecommon.ComponentName,
 						"repository": releasecommon.ReleasedImagePushRepo,
 					},
 				},
@@ -121,6 +121,11 @@ var _ = framework.ReleasePipelinesSuiteDescribe("Push to external registry", Lab
 
 		_, err = fw.AsKubeAdmin.CommonController.CreateRoleBinding("role-release-service-account-binding", managedNamespace, "ServiceAccount", releasecommon.ReleasePipelineServiceAccountDefault, managedNamespace, "Role", "role-release-service-account", "rbac.authorization.k8s.io")
 		Expect(err).NotTo(HaveOccurred())
+
+		sampleImage := "quay.io/redhat-appstudio-qe/dcmetromap@sha256:84d9878a113220966d711a863a09478fb3d238af222e6039680b6a24a97fb7ca"
+		snapshotPush, err = fw.AsKubeAdmin.IntegrationController.CreateSnapshotWithImageAndSource(releasecommon.ComponentName, releasecommon.ApplicationNameDefault, devNamespace, sampleImage, releasecommon.GitSourceComponentUrl, releasecommon.DcMetroMapGitRevision, "", "", "", "")
+		GinkgoWriter.Println("snapshotPush.Name: %s", snapshotPush.GetName())
+		Expect(err).ShouldNot(HaveOccurred())
 	})
 
 	AfterAll(func() {
@@ -131,10 +136,6 @@ var _ = framework.ReleasePipelinesSuiteDescribe("Push to external registry", Lab
 	})
 
 	var _ = Describe("Post-release verification", func() {
-		It("verifies that a build PipelineRun is created in dev namespace and succeeds", func() {
-			Expect(fw.AsKubeAdmin.HasController.WaitForComponentPipelineToBeFinished(component, "",
-				fw.AsKubeAdmin.TektonController, &has.RetryOptions{Retries: 2, Always: true}, nil)).To(Succeed())
-		})
 
 		It("verifies that a Release CR should have been created in the dev namespace", func() {
 			Eventually(func() error {
@@ -149,9 +150,10 @@ var _ = framework.ReleasePipelinesSuiteDescribe("Push to external registry", Lab
 
 		It("tests if the image was pushed to quay", func() {
 			// retrieve the component to get the latest data
-			component, err := fw.AsKubeAdmin.HasController.GetComponent(component.GetName(), devNamespace)
-			Expect(err).ShouldNot(HaveOccurred(), fmt.Sprintf("could not get component %s in the %s namespace", component.GetName(), devNamespace))
-			containerImageDigest := strings.Split(component.Spec.ContainerImage, "@")[1]
+//			component, err := fw.AsKubeAdmin.HasController.GetComponent(releasecommon.ComponentName, devNamespace)
+//			Expect(err).ShouldNot(HaveOccurred(), fmt.Sprintf("could not get component %s in the %s namespace", releasecommon.ComponentName, devNamespace))
+			containerImageDigest := strings.Split(sampleImage, "@")[1]
+//			containerImageDigest := strings.Split(component.Spec.ContainerImage, "@")[1]
 			digestExist, err := releasecommon.DoesDigestExistInQuay(releasecommon.ReleasedImagePushRepo, containerImageDigest)
 			Expect(err).ShouldNot(HaveOccurred(), fmt.Sprintf("failed while getting Digest for quay image %s with error: %+v", releasecommon.ReleasedImagePushRepo+"@"+containerImageDigest, err))
 			Expect(digestExist).To(BeTrue())

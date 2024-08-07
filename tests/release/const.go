@@ -34,9 +34,11 @@ const (
 
 	// Pipelines constants
 	ComponentName                   string = "dc-metro-map"
-	GitSourceComponentUrl           string = "https://github.com/scoheb/dc-metro-map"
+	GitSourceComponentUrl           string = "https://github.com/redhat-appstudio-qe/dc-metro-map"
+	DcMetroMapGitRevision           string = "fe7f1998db631f30cc5b59308f3ecd74217e177c"
 	AdditionalComponentName         string = "simple-python"
 	AdditionalGitSourceComponentUrl string = "https://github.com/devfile-samples/devfile-sample-python-basic"
+	SimplePythonGitRevision         string = "a173e9438acf0de420bce85809dfeaa7e296603d"
 	ReleasedImagePushRepo           string = "quay.io/redhat-appstudio-qe/dcmetromap"
 	AdditionalReleasedImagePushRepo string = "quay.io/redhat-appstudio-qe/simplepython"
 	PyxisStageImagesApiEndpoint     string = "https://pyxis.preprod.api.redhat.com/v1/images/id/"
