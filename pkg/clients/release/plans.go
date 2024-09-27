@@ -27,10 +27,10 @@ func (r *ReleaseController) CreateReleasePlan(name, namespace, application, targ
 			},
 		},
 		Spec: releaseApi.ReleasePlanSpec{
-			Application: application,
-			Data:        data,
-			Pipeline:    tenantPipeline,
-			Target:      targetNamespace,
+			Application:	application,
+			Data:		data,
+			TenantPipeline:	tenantPipeline,
+			Target:		targetNamespace,
 		},
 	}
 	if autoReleaseLabel == "" || autoReleaseLabel == "true" {
