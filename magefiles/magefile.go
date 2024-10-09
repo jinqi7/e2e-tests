@@ -305,7 +305,7 @@ func (ci CI) TestE2E() error {
 	// Eventually we'll introduce mage rules for all repositories, so this condition won't be needed anymore
 	if pr.RepoName == "e2e-tests" || pr.RepoName == "integration-service" ||
 		pr.RepoName == "release-service" || pr.RepoName == "image-controller" ||
-		pr.RepoName == "build-service" {
+		pr.RepoName == "build-service" || pr.RepoName == "release-service-catalog" {
 		return engine.MageEngine.RunRulesOfCategory("ci", rctx)
 	}
 
@@ -564,7 +564,7 @@ func setRequiredEnvVars() error {
 				if isPRPairingRequired("release-service") {
 					os.Setenv(fmt.Sprintf("%s_IMAGE_REPO", envVarPrefix),
 						"quay.io/redhat-user-workloads/rhtap-release-2-tenant/release-service/release-service")
-					pairedSha := getPairedCommitSha("release-service")
+					pairedSha := GetPairedCommitSha("release-service")
 					if pairedSha != "" {
 						os.Setenv(fmt.Sprintf("%s_IMAGE_TAG", envVarPrefix), fmt.Sprintf("on-pr-%s", pairedSha))
 					}
@@ -834,7 +834,7 @@ func isPRPairingRequired(repoForPairing string) bool {
 	return false
 }
 
-func getPairedCommitSha(repoForPairing string) string {
+func GetPairedCommitSha(repoForPairing string) string {
 	var pullRequests []gh.PullRequest
 
 	url := fmt.Sprintf("https://api.github.com/repos/redhat-appstudio/%s/pulls?per_page=100", repoForPairing)

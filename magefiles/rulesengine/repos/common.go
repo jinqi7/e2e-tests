@@ -15,6 +15,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	remoteimg "github.com/google/go-containerregistry/pkg/v1/remote"
 	gh "github.com/google/go-github/v44/github"
+	"github.com/konflux-ci/e2e-tests/magefiles"
 	"github.com/konflux-ci/e2e-tests/magefiles/installation"
 	"github.com/konflux-ci/e2e-tests/magefiles/rulesengine"
 	"github.com/konflux-ci/e2e-tests/pkg/clients/slack"
@@ -86,6 +87,25 @@ func ExecuteTestAction(rctx *rulesengine.RuleCtx) error {
 	argsToRun = append(argsToRun, "./cmd", "--")
 	return sh.RunV("ginkgo", argsToRun...)
 
+}
+
+func ExecuteReleaseCatalogPairedAction(rctx *rulesengine.RuleCtx) error {
+	os.Setenv(fmt.Sprintf("%s_IMAGE_REPO", rctx.ComponentEnvVarPrefix),
+		"quay.io/redhat-user-workloads/rhtap-release-2-tenant/release-service/release-service")
+	pairedSha := getPairedCommitSha("release-service")
+	if pairedSha != "" {
+		os.Setenv(fmt.Sprintf("%s_IMAGE_TAG", rctx.ComponentEnvVarPrefix), fmt.Sprintf("on-pr-%s", pairedSha))
+	}
+	os.Setenv(fmt.Sprintf("%s_PR_OWNER", rctx.ComponentEnvVarPrefix), rctx.PrRemoteName)
+	os.Setenv(fmt.Sprintf("%s_PR_SHA", rctx.ComponentEnvVarPrefix), pairedSha)
+
+	rctx.LabelFilter = "release-pipelines && !fbc-tests"
+	return ExecuteTestAction(rctx)
+}
+
+func ExecuteReleaseCatalogAction(rctx *rulesengine.RuleCtx) error {
+	rctx.LabelFilter = "release-pipelines"
+	return ExecuteTestAction(rctx)
 }
 
 func IsPeriodicJob(rctx *rulesengine.RuleCtx) (bool, error) {
