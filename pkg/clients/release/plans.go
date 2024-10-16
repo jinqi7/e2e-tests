@@ -15,7 +15,7 @@ import (
 )
 
 // CreateReleasePlan creates a new ReleasePlan using the given parameters.
-func (r *ReleaseController) CreateReleasePlan(name, namespace, application, targetNamespace, autoReleaseLabel string, data *runtime.RawExtension, tenantPipeline *tektonutils.ParameterizedPipeline) (*releaseApi.ReleasePlan, error) {
+func (r *ReleaseController) CreateReleasePlan(name, namespace, application, targetNamespace, autoReleaseLabel string, data *runtime.RawExtension, tenantPipeline *tektonutils.ParameterizedPipeline, finalPipeline *tektonutils.ParameterizedPipeline) (*releaseApi.ReleasePlan, error) {
 	var releasePlan *releaseApi.ReleasePlan = &releaseApi.ReleasePlan{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: name,
@@ -30,6 +30,7 @@ func (r *ReleaseController) CreateReleasePlan(name, namespace, application, targ
 			Application:	application,
 			Data:		data,
 			TenantPipeline:	tenantPipeline,
+			FinalPipeline:	finalPipeline,
 			Target:		targetNamespace,
 		},
 	}

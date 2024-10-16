@@ -82,7 +82,7 @@ var _ = framework.ReleaseServiceSuiteDescribe("Release service tenant pipeline",
 
 		_, err = fw.AsKubeAdmin.ReleaseController.CreateReleasePlan(releasecommon.SourceReleasePlanName, devNamespace, releasecommon.ApplicationNameDefault, "", "", &runtime.RawExtension{
                         Raw: data,
-                }, tenantPipeline)
+                }, tenantPipeline, nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		_, err = fw.AsKubeAdmin.TektonController.CreatePVCInAccessMode(releasecommon.ReleasePvcName, devNamespace, corev1.ReadWriteOnce)
