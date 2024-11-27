@@ -341,10 +341,18 @@ func createFBCEnterpriseContractPolicy(fbcECPName string, managedFw framework.Fr
 
 func createFBCReleasePlanAdmission(fbcRPAName string, managedFw framework.Framework, devNamespace, managedNamespace, fbcAppName, fbcECPName, pathInRepoValue, hotfix, issueId, preGA, productName, productVersion, isStagedIndex string) {
 	var err error
+	var targetIndex string
+
+	if isStagedIndex == "true" {
+		targetIndex = ""
+	} else {
+		targetIndex = constants.TargetIndex
+	}
 	data, err := json.Marshal(map[string]interface{}{
 		"fbc": map[string]interface{}{
 			"fromIndex":                       constants.FromIndex,
 			"stagedIndex":                     isStagedIndex,
+			"targetIndex":                     targetIndex,
 			"publishingCredentials":           "fbc-preview-publishing-credentials",
 			"requestUpdateTimeout":            "1500",
 			"buildTimeoutSeconds":             "1500",
@@ -359,18 +367,6 @@ func createFBCReleasePlanAdmission(fbcRPAName string, managedFw framework.Framew
 			"configMapName": "hacbs-signing-pipeline-config-redhatbeta2",
 		},
 	})
-	Expect(err).NotTo(HaveOccurred())
-
-	var structData map[string]interface{}
-	err = json.Unmarshal(data, &structData)
-	Expect(err).NotTo(HaveOccurred())
-
-	if isStagedIndex == "true" {
-		structData["fbc"].(map[string]interface{})["targetIndex"] = ""
-        } else {
-		structData["fbc"].(map[string]interface{})["targetIndex"] = constants.TargetIndex
-	}
-	data, err = json.Marshal(structData)
 	Expect(err).NotTo(HaveOccurred())
 
 	_, err = managedFw.AsKubeAdmin.ReleaseController.CreateReleasePlanAdmission(fbcRPAName, managedNamespace, "", devNamespace, fbcECPName, fbcServiceAccountName, []string{fbcAppName}, true, &tektonutils.PipelineRef{
