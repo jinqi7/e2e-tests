@@ -5,40 +5,50 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/devfile/library/v2/pkg/util"
-	ecp "github.com/enterprise-contract/enterprise-contract-controller/api/v1alpha1"
 	appservice "github.com/konflux-ci/application-api/api/v1alpha1"
+	ecp "github.com/enterprise-contract/enterprise-contract-controller/api/v1alpha1"
+	"github.com/devfile/library/v2/pkg/util"
 	"github.com/konflux-ci/e2e-tests/pkg/constants"
 	"github.com/konflux-ci/e2e-tests/pkg/framework"
 	"github.com/konflux-ci/e2e-tests/pkg/utils"
 	"github.com/konflux-ci/e2e-tests/pkg/utils/tekton"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
+	"knative.dev/pkg/apis"
 	pipeline "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	releasecommon "github.com/konflux-ci/e2e-tests/tests/release"
 	releaseapi "github.com/konflux-ci/release-service/api/v1alpha1"
 	tektonutils "github.com/konflux-ci/release-service/tekton/utils"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/runtime"
-	"knative.dev/pkg/apis"
 )
 
 const (
-	fbcServiceAccountName   = "release-service-account"
-	fbcSourceGitURL         = "https://github.com/redhat-appstudio-qe/fbc-sample-repo"
-	fbcGitSrcSHA            = "2b04501c777aa4f7ad80f3e233731f3201e5b21b"
-	fbcDockerFilePath       = "catalog.Dockerfile"
-	targetPort              = 50051
-	relSvcCatalogPathInRepo = "pipelines/managed/fbc-release/fbc-release.yaml"
+	fbcServiceAccountName       = "release-service-account"
+	fbcSourceGitURL             = "https://github.com/redhat-appstudio-qe/fbc-sample-repo-test"
+	fbcCompRepoName             = "fbc-sample-repo-test"
+	fbcCompRevision             = "139b6b8d9adca6bd6f0081482ecd284cbedc2681"
+	fbcCompDefaultBranchName    = "main"
+	fbcDockerFilePath           = "catalog.Dockerfile"
+	targetPort                  = 50051
+	relSvcCatalogPathInRepo     = "pipelines/fbc-release/fbc-release.yaml"
 )
 
-var snapshot *appservice.Snapshot
-var releaseCR *releaseapi.Release
-var pipelineRun *pipeline.PipelineRun
-var err error
 var devWorkspace = utils.GetEnv(constants.RELEASE_DEV_WORKSPACE_ENV, constants.DevReleaseTeam)
 var managedWorkspace = utils.GetEnv(constants.RELEASE_MANAGED_WORKSPACE_ENV, constants.ManagedReleaseTeam)
 var devFw *framework.Framework
 var managedFw *framework.Framework
+var snapshot *appservice.Snapshot
+var releaseCR *releaseapi.Release
+var pipelineRun *pipeline.PipelineRun
+var fbcComponent *appservice.Component
+
+var err error
+
+// PaC related variables
+var fbcPacBranchName string
+var fbcCompBaseBranchName string
 
 var _ = framework.ReleasePipelinesSuiteDescribe("FBC e2e-tests", Label("release-pipelines", "fbc-tests"), func() {
 	defer GinkgoRecover()
@@ -53,10 +63,6 @@ var _ = framework.ReleasePipelinesSuiteDescribe("FBC e2e-tests", Label("release-
 	var fbcStagedAppName = "fbc-staged-app-" + util.GenerateRandomString(4)
 	var fbcHotfixAppName = "fbc-hotfix-app-" + util.GenerateRandomString(4)
 	var fbcPreGAAppName = "fbc-prega-app-" + util.GenerateRandomString(4)
-	var fbcComponentName = "fbc-pipelines-comp-" + util.GenerateRandomString(4)
-	var fbcStagedCompName = "fbc-staged-comp-" + util.GenerateRandomString(4)
-	var fbcHotfixCompName = "fbc-hotfix-comp-" + util.GenerateRandomString(4)
-	var fbcPreGACompName = "fbc-prega-comp-" + util.GenerateRandomString(4)
 	var fbcReleasePlanName = "fbc-pipelines-rp-" + util.GenerateRandomString(4)
 	var fbcStagedRPName = "fbc-staged-rp-" + util.GenerateRandomString(4)
 	var fbcHotfixRPName = "fbc-hotfix-rp-" + util.GenerateRandomString(4)
@@ -69,28 +75,33 @@ var _ = framework.ReleasePipelinesSuiteDescribe("FBC e2e-tests", Label("release-
 	var fbcStagedECPolicyName = "fbc-staged-policy-" + util.GenerateRandomString(4)
 	var fbcHotfixECPolicyName = "fbc-hotfix-policy-" + util.GenerateRandomString(4)
 	var fbcPreGAECPolicyName = "fbc-prega-policy-" + util.GenerateRandomString(4)
-	var sampleImage	= "quay.io/hacbs-release-tests/fbc-sample-repo@sha256:857814679c1deec5bc5d6d8064832b4c0af40dcb07dad57c48f23e5ba6926aed"
 
 	Describe("with FBC happy path", Label("fbcHappyPath"), func() {
 		BeforeAll(func() {
 			devFw = releasecommon.NewFramework(devWorkspace)
 			managedFw = releasecommon.NewFramework(managedWorkspace)
-
 			managedNamespace = managedFw.UserNamespace
 
 			_, err = devFw.AsKubeDeveloper.HasController.CreateApplication(fbcApplicationName, devNamespace)
 			Expect(err).NotTo(HaveOccurred())
-			GinkgoWriter.Println("Created application :", fbcApplicationName)
+			GinkgoWriter.Println("created application :", fbcApplicationName)
 
 			_, err = devFw.AsKubeDeveloper.ReleaseController.CreateReleasePlan(fbcReleasePlanName, devNamespace, fbcApplicationName, managedNamespace, "true", nil, nil, nil)
 			Expect(err).NotTo(HaveOccurred())
 
+			sourceAuthJson := utils.GetEnv("QUAY_TOKEN", "")
+			Expect(sourceAuthJson).ToNot(BeEmpty())
+
+			secret, err := devFw.AsKubeAdmin.CommonController.GetSecret(devNamespace, releasecommon.QuayTokenSecret)
+			if secret == nil || errors.IsNotFound(err) {
+				_, err = devFw.AsKubeAdmin.CommonController.CreateRegistryAuthSecret(releasecommon.QuayTokenSecret, devNamespace, sourceAuthJson)
+				Expect(err).ToNot(HaveOccurred())
+				err = devFw.AsKubeAdmin.CommonController.LinkSecretToServiceAccount(devNamespace, releasecommon.QuayTokenSecret, constants.DefaultPipelineServiceAccount, true)
+				Expect(err).ToNot(HaveOccurred())
+			}
+
 			createFBCReleasePlanAdmission(fbcReleasePlanAdmissionName, *managedFw, devNamespace, managedNamespace, fbcApplicationName, fbcEnterpriseContractPolicyName, relSvcCatalogPathInRepo, false, "", false, "", "", false)
-
 			createFBCEnterpriseContractPolicy(fbcEnterpriseContractPolicyName, *managedFw, devNamespace, managedNamespace)
-			snapshot, err = releasecommon.CreateSnapshotWithImageSource(*devFw, fbcComponentName, fbcApplicationName, devNamespace, sampleImage, fbcSourceGitURL, fbcGitSrcSHA, "", "", "", "")
-                        Expect(err).ShouldNot(HaveOccurred())
-
 		})
 
 		AfterAll(func() {
@@ -100,25 +111,43 @@ var _ = framework.ReleasePipelinesSuiteDescribe("FBC e2e-tests", Label("release-
 			if err = managedFw.AsKubeDeveloper.TektonController.StorePipelineRun(pipelineRun.Name, pipelineRun); err != nil {
 				GinkgoWriter.Printf("failed to store PipelineRun %s:%s: %s\n", pipelineRun.GetNamespace(), pipelineRun.GetName(), err.Error())
 			}
-			if err = managedFw.AsKubeDeveloper.TektonController.StoreTaskRunsForPipelineRun(managedFw.AsKubeDeveloper.CommonController.KubeRest(), pipelineRun); err != nil {
-				GinkgoWriter.Printf("failed to store TaskRuns for PipelineRun %s:%s: %s\n", pipelineRun.GetNamespace(), pipelineRun.GetName(), err.Error())
-			}
 			if err = devFw.AsKubeDeveloper.ReleaseController.StoreRelease(releaseCR); err != nil {
 				GinkgoWriter.Printf("failed to store Release %s:%s: %s\n", releaseCR.GetNamespace(), releaseCR.GetName(), err.Error())
 			}
+			// delete CRs			
 			Expect(devFw.AsKubeDeveloper.HasController.DeleteApplication(fbcApplicationName, devNamespace, false)).NotTo(HaveOccurred())
 			Expect(managedFw.AsKubeDeveloper.TektonController.DeleteEnterpriseContractPolicy(fbcEnterpriseContractPolicyName, managedNamespace, false)).NotTo(HaveOccurred())
 			Expect(managedFw.AsKubeDeveloper.ReleaseController.DeleteReleasePlanAdmission(fbcReleasePlanAdmissionName, managedNamespace, false)).NotTo(HaveOccurred())
+			if err = devFw.AsKubeDeveloper.CommonController.Github.DeleteRef(fbcCompRepoName, fbcCompBaseBranchName); err != nil {
+				Expect(err.Error()).To(ContainSubstring("Reference does not exist"))
+			}
+			// Delete new branches created by PaC and a testing branch used as a component's base branch
+			err = devFw.AsKubeDeveloper.CommonController.Github.DeleteRef(fbcCompRepoName, fbcPacBranchName)
+			if err != nil {
+				Expect(err.Error()).To(ContainSubstring(releasecommon.ReferenceDoesntExist))
+			}
+			err = devFw.AsKubeDeveloper.CommonController.Github.DeleteRef(fbcCompRepoName, fbcCompBaseBranchName)
+			if err != nil {
+				Expect(err.Error()).To(ContainSubstring(releasecommon.ReferenceDoesntExist))
+			}
 		})
 
 		var _ = Describe("Post-release verification", func() {
+			It(fmt.Sprintf("creates component from git source %s", fbcSourceGitURL), func() {
+				fbcComponent, fbcPacBranchName, fbcCompBaseBranchName = releasecommon.CreateReleaseComponent(*devFw, devNamespace, fbcApplicationName, fbcCompRepoName, fbcSourceGitURL, fbcCompRevision, "4.13", fbcDockerFilePath, utils.MergeMaps(utils.MergeMaps(constants.ComponentPaCRequestAnnotation, constants.ImageControllerAnnotationRequestPublicRepo), constants.DefaultFbcBuilderPipelineBundle))
+				GinkgoWriter.Printf("created component : ", fbcComponent.GetName())
+			})
+
+			It("Creates a push snapshot for a release", func() {
+				snapshot = releasecommon.CreatePushSnapshot(devFw, devNamespace, fbcApplicationName, fbcCompRepoName, fbcPacBranchName, pipelineRun, fbcComponent)
+			})
 
 			It("verifies the fbc release pipelinerun is running and succeeds", func() {
-				assertReleasePipelineRunSucceeded(devFw, managedFw, devNamespace, managedNamespace, fbcApplicationName, fbcComponentName)
+				assertReleasePipelineRunSucceeded(devFw, managedFw, devNamespace, managedNamespace, fbcApplicationName, fbcComponent.GetName())
 			})
 
 			It("verifies release CR completed and set succeeded.", func() {
-				assertReleaseCRSucceeded(devFw, devNamespace, managedNamespace, fbcApplicationName, fbcComponentName)
+				assertReleaseCRSucceeded(devFw, devNamespace, managedNamespace, fbcApplicationName, fbcComponent.GetName())
 			})
 		})
 	})
@@ -140,9 +169,6 @@ var _ = framework.ReleasePipelinesSuiteDescribe("FBC e2e-tests", Label("release-
 			createFBCReleasePlanAdmission(fbcStagedRPAName, *managedFw, devNamespace, managedNamespace, fbcStagedAppName, fbcStagedECPolicyName, relSvcCatalogPathInRepo, false, "", false, "", "", true)
 
 			createFBCEnterpriseContractPolicy(fbcStagedECPolicyName, *managedFw, devNamespace, managedNamespace)
-			snapshot, err = releasecommon.CreateSnapshotWithImageSource(*devFw, fbcStagedCompName, fbcStagedAppName, devNamespace, sampleImage, fbcSourceGitURL, fbcGitSrcSHA, "", "", "", "")
-                        Expect(err).ShouldNot(HaveOccurred())
-
 		})
 
 		AfterAll(func() {
@@ -152,28 +178,37 @@ var _ = framework.ReleasePipelinesSuiteDescribe("FBC e2e-tests", Label("release-
 			if err = managedFw.AsKubeDeveloper.TektonController.StorePipelineRun(pipelineRun.Name, pipelineRun); err != nil {
 				GinkgoWriter.Printf("failed to store PipelineRun %s:%s: %s\n", pipelineRun.GetNamespace(), pipelineRun.GetName(), err.Error())
 			}
-			if err = managedFw.AsKubeDeveloper.TektonController.StoreTaskRunsForPipelineRun(managedFw.AsKubeDeveloper.CommonController.KubeRest(), pipelineRun); err != nil {
-				GinkgoWriter.Printf("failed to store TaskRuns for PipelineRun %s:%s: %s\n", pipelineRun.GetNamespace(), pipelineRun.GetName(), err.Error())
-			}
 			if err = devFw.AsKubeDeveloper.ReleaseController.StoreRelease(releaseCR); err != nil {
 				GinkgoWriter.Printf("failed to store Release %s:%s: %s\n", releaseCR.GetNamespace(), releaseCR.GetName(), err.Error())
 			}
 			Expect(devFw.AsKubeDeveloper.HasController.DeleteApplication(fbcStagedAppName, devNamespace, false)).NotTo(HaveOccurred())
 			Expect(managedFw.AsKubeDeveloper.TektonController.DeleteEnterpriseContractPolicy(fbcStagedECPolicyName, managedNamespace, false)).NotTo(HaveOccurred())
 			Expect(managedFw.AsKubeDeveloper.ReleaseController.DeleteReleasePlanAdmission(fbcStagedRPAName, managedNamespace, false)).NotTo(HaveOccurred())
+			if err = devFw.AsKubeDeveloper.CommonController.Github.DeleteRef(fbcCompRepoName, fbcCompBaseBranchName); err != nil {
+				Expect(err.Error()).To(ContainSubstring("Reference does not exist"))
+			}
 		})
 
 		var _ = Describe("Post-release verification", func() {
+			It(fmt.Sprintf("creates component from git source %s", fbcSourceGitURL), func() {
+				fbcComponent, fbcPacBranchName, fbcCompBaseBranchName = releasecommon.CreateReleaseComponent(*devFw, devNamespace, fbcStagedAppName, fbcCompRepoName, fbcSourceGitURL, fbcCompRevision, "4.13", fbcDockerFilePath, utils.MergeMaps(utils.MergeMaps(constants.ComponentPaCRequestAnnotation, constants.ImageControllerAnnotationRequestPublicRepo), constants.DefaultFbcBuilderPipelineBundle))
+				GinkgoWriter.Printf("created component : ", fbcComponent.GetName())
+			})
+
+			It("Creates a push snapshot for a release", func() {
+				snapshot = releasecommon.CreatePushSnapshot(devFw, devNamespace, fbcStagedAppName, fbcCompRepoName, fbcPacBranchName, pipelineRun, fbcComponent)
+			})
 
 			It("verifies the fbc release pipelinerun is running and succeeds", func() {
-				assertReleasePipelineRunSucceeded(devFw, managedFw, devNamespace, managedNamespace, fbcStagedAppName, fbcStagedCompName)
+				assertReleasePipelineRunSucceeded(devFw, managedFw, devNamespace, managedNamespace, fbcStagedAppName, fbcComponent.GetName())
 			})
 
 			It("verifies release CR completed and set succeeded.", func() {
-				assertReleaseCRSucceeded(devFw, devNamespace, managedNamespace, fbcStagedAppName, fbcStagedCompName)
+				assertReleaseCRSucceeded(devFw, devNamespace, managedNamespace, fbcStagedAppName, fbcComponent.GetName())
 			})
 		})
 	})
+
 	Describe("with FBC hotfix process", Label("fbcHotfix"), func() {
 
 		BeforeAll(func() {
@@ -190,9 +225,6 @@ var _ = framework.ReleasePipelinesSuiteDescribe("FBC e2e-tests", Label("release-
 			createFBCReleasePlanAdmission(fbcHotfixRPAName, *managedFw, devNamespace, managedNamespace, fbcHotfixAppName, fbcHotfixECPolicyName, relSvcCatalogPathInRepo, true, issueId, false, "", "", false)
 
 			createFBCEnterpriseContractPolicy(fbcHotfixECPolicyName, *managedFw, devNamespace, managedNamespace)
-
-			snapshot, err = releasecommon.CreateSnapshotWithImageSource(*devFw, fbcHotfixCompName, fbcHotfixAppName, devNamespace, sampleImage, fbcSourceGitURL, fbcGitSrcSHA, "", "", "", "")
-                        Expect(err).ShouldNot(HaveOccurred())
 		})
 
 		AfterAll(func() {
@@ -202,25 +234,34 @@ var _ = framework.ReleasePipelinesSuiteDescribe("FBC e2e-tests", Label("release-
 			if err = managedFw.AsKubeDeveloper.TektonController.StorePipelineRun(pipelineRun.Name, pipelineRun); err != nil {
 				GinkgoWriter.Printf("failed to store PipelineRun %s:%s: %s\n", pipelineRun.GetNamespace(), pipelineRun.GetName(), err.Error())
 			}
-			if err = managedFw.AsKubeDeveloper.TektonController.StoreTaskRunsForPipelineRun(managedFw.AsKubeDeveloper.CommonController.KubeRest(), pipelineRun); err != nil {
-				GinkgoWriter.Printf("failed to store TaskRuns for PipelineRun %s:%s: %s\n", pipelineRun.GetNamespace(), pipelineRun.GetName(), err.Error())
-			}
 			if err = devFw.AsKubeDeveloper.ReleaseController.StoreRelease(releaseCR); err != nil {
 				GinkgoWriter.Printf("failed to store Release %s:%s: %s\n", releaseCR.GetNamespace(), releaseCR.GetName(), err.Error())
 			}
 			Expect(devFw.AsKubeDeveloper.HasController.DeleteApplication(fbcHotfixAppName, devNamespace, false)).NotTo(HaveOccurred())
 			Expect(managedFw.AsKubeDeveloper.TektonController.DeleteEnterpriseContractPolicy(fbcHotfixECPolicyName, managedNamespace, false)).NotTo(HaveOccurred())
 			Expect(managedFw.AsKubeDeveloper.ReleaseController.DeleteReleasePlanAdmission(fbcHotfixRPAName, managedNamespace, false)).NotTo(HaveOccurred())
+			if err = devFw.AsKubeDeveloper.CommonController.Github.DeleteRef(fbcCompRepoName, fbcCompBaseBranchName); err != nil {
+				Expect(err.Error()).To(ContainSubstring("Reference does not exist"))
+			}
 		})
 
 		var _ = Describe("FBC hotfix post-release verification", func() {
 
+			It(fmt.Sprintf("creates component from git source %s", fbcSourceGitURL), func() {
+				fbcComponent, fbcPacBranchName, fbcCompBaseBranchName = releasecommon.CreateReleaseComponent(*devFw, devNamespace, fbcHotfixAppName, fbcCompRepoName, fbcSourceGitURL, fbcCompRevision, "4.13", fbcDockerFilePath, utils.MergeMaps(utils.MergeMaps(constants.ComponentPaCRequestAnnotation, constants.ImageControllerAnnotationRequestPublicRepo), constants.DefaultFbcBuilderPipelineBundle))
+				GinkgoWriter.Printf("created component : ", fbcComponent.GetName())
+			})
+
+			It("Creates a push snapshot for a release", func() {
+				snapshot = releasecommon.CreatePushSnapshot(devFw, devNamespace, fbcHotfixAppName, fbcCompRepoName, fbcPacBranchName, pipelineRun, fbcComponent)
+			})
+
 			It("verifies the fbc release pipelinerun is running and succeeds", func() {
-				assertReleasePipelineRunSucceeded(devFw, managedFw, devNamespace, managedNamespace, fbcHotfixAppName, fbcHotfixCompName)
+				assertReleasePipelineRunSucceeded(devFw, managedFw, devNamespace, managedNamespace, fbcHotfixAppName, fbcComponent.GetName())
 			})
 
 			It("verifies release CR completed and set succeeded.", func() {
-				assertReleaseCRSucceeded(devFw, devNamespace, managedNamespace, fbcHotfixAppName, fbcHotfixCompName)
+				assertReleaseCRSucceeded(devFw, devNamespace, managedNamespace, fbcHotfixAppName, fbcComponent.GetName())
 			})
 		})
 	})
@@ -240,9 +281,6 @@ var _ = framework.ReleasePipelinesSuiteDescribe("FBC e2e-tests", Label("release-
 
 			createFBCEnterpriseContractPolicy(fbcPreGAECPolicyName, *managedFw, devNamespace, managedNamespace)
 			createFBCReleasePlanAdmission(fbcPreGARPAName, *managedFw, devNamespace, managedNamespace, fbcPreGAAppName, fbcPreGAECPolicyName, relSvcCatalogPathInRepo, false, issueId, true, productName, productVersion, false)
-
-			snapshot, err = releasecommon.CreateSnapshotWithImageSource(*devFw, fbcPreGACompName, fbcPreGAAppName, devNamespace, sampleImage, fbcSourceGitURL, fbcGitSrcSHA, "", "", "", "")
-                        Expect(err).ShouldNot(HaveOccurred())
 		})
 
 		AfterAll(func() {
@@ -252,25 +290,33 @@ var _ = framework.ReleasePipelinesSuiteDescribe("FBC e2e-tests", Label("release-
 			if err = managedFw.AsKubeDeveloper.TektonController.StorePipelineRun(pipelineRun.Name, pipelineRun); err != nil {
 				GinkgoWriter.Printf("failed to store PipelineRun %s:%s: %s\n", pipelineRun.GetNamespace(), pipelineRun.GetName(), err.Error())
 			}
-			if err = managedFw.AsKubeDeveloper.TektonController.StoreTaskRunsForPipelineRun(managedFw.AsKubeDeveloper.CommonController.KubeRest(), pipelineRun); err != nil {
-				GinkgoWriter.Printf("failed to store TaskRuns for PipelineRun %s:%s: %s\n", pipelineRun.GetNamespace(), pipelineRun.GetName(), err.Error())
-			}
 			if err = devFw.AsKubeDeveloper.ReleaseController.StoreRelease(releaseCR); err != nil {
 				GinkgoWriter.Printf("failed to store Release %s:%s: %s\n", releaseCR.GetNamespace(), releaseCR.GetName(), err.Error())
 			}
 			Expect(devFw.AsKubeDeveloper.HasController.DeleteApplication(fbcPreGAAppName, devNamespace, false)).NotTo(HaveOccurred())
 			Expect(managedFw.AsKubeDeveloper.TektonController.DeleteEnterpriseContractPolicy(fbcPreGAECPolicyName, managedNamespace, false)).NotTo(HaveOccurred())
 			Expect(managedFw.AsKubeDeveloper.ReleaseController.DeleteReleasePlanAdmission(fbcPreGARPAName, managedNamespace, false)).NotTo(HaveOccurred())
+			if err = devFw.AsKubeDeveloper.CommonController.Github.DeleteRef(fbcCompRepoName, fbcCompBaseBranchName); err != nil {
+				Expect(err.Error()).To(ContainSubstring("Reference does not exist"))
+			}
 		})
 
 		var _ = Describe("FBC pre-GA post-release verification", func() {
+			It(fmt.Sprintf("creates component from git source %s", fbcSourceGitURL), func() {
+				fbcComponent, fbcPacBranchName, fbcCompBaseBranchName = releasecommon.CreateReleaseComponent(*devFw, devNamespace, fbcPreGAAppName, fbcCompRepoName, fbcSourceGitURL, fbcCompRevision, "4.13", fbcDockerFilePath, utils.MergeMaps(utils.MergeMaps(constants.ComponentPaCRequestAnnotation, constants.ImageControllerAnnotationRequestPublicRepo), constants.DefaultFbcBuilderPipelineBundle))
+				GinkgoWriter.Printf("created component : ", fbcComponent.GetName())
+			})
+
+			It("Creates a push snapshot for a release", func() {
+				snapshot = releasecommon.CreatePushSnapshot(devFw, devNamespace, fbcPreGAAppName, fbcCompRepoName, fbcPacBranchName, pipelineRun, fbcComponent)
+			})
 
 			It("verifies the fbc release pipelinerun is running and succeeds", func() {
-				assertReleasePipelineRunSucceeded(devFw, managedFw, devNamespace, managedNamespace, fbcPreGAAppName, fbcPreGACompName)
+				assertReleasePipelineRunSucceeded(devFw, managedFw, devNamespace, managedNamespace, fbcPreGAAppName, fbcComponent.GetName())
 			})
 
 			It("verifies release CR completed and set succeeded.", func() {
-				assertReleaseCRSucceeded(devFw, devNamespace, managedNamespace, fbcPreGAAppName, fbcPreGACompName)
+				assertReleaseCRSucceeded(devFw, devNamespace, managedNamespace, fbcPreGAAppName, fbcComponent.GetName())
 			})
 		})
 	})
@@ -299,7 +345,7 @@ func assertReleasePipelineRunSucceeded(devFw, managedFw *framework.Framework, de
 			GinkgoWriter.Printf("PipelineRun %s reason: %s\n", pipelineRun.Name, condition.Reason)
 		}
 
-		if !pipelineRun.IsDone(){
+		if !pipelineRun.IsDone() {
 			return fmt.Errorf("PipelineRun %s has still not finished yet", pipelineRun.Name)
 		}
 
@@ -360,24 +406,24 @@ func createFBCReleasePlanAdmission(fbcRPAName string, managedFw framework.Framew
 	}
 	if isStagedIndex {
 		targetIndex = ""
-        } else {
+	} else {
 		targetIndex = constants.TargetIndex
 	}
 
 	data, err := json.Marshal(map[string]interface{}{
 		"fbc": map[string]interface{}{
-			"fromIndex":                       constants.FromIndex,
-			"stagedIndex":                     isStagedIndex,
-			"targetIndex":                     targetIndex,
-			"publishingCredentials":           "fbc-preview-publishing-credentials",
-			"requestTimeoutSeconds":           1500,
-			"buildTimeoutSeconds":             1500,
-			"hotfix":                          hotfix,
-			"issueId":                         issueId,
-			"preGA":                           preGA,
-			"productName":                     productName,
-			"productVersion":                  productVersion,
-			"allowedPackages":                 []string{"example-operator"},
+			"fromIndex":             constants.FromIndex,
+			"stagedIndex":           isStagedIndex,
+			"targetIndex":           targetIndex,
+			"publishingCredentials": "fbc-preview-publishing-credentials",
+			"requestTimeoutSeconds": 1500,
+			"buildTimeoutSeconds":   1500,
+			"hotfix":                hotfix,
+			"issueId":               issueId,
+			"preGA":                 preGA,
+			"productName":           productName,
+			"productVersion":        productVersion,
+			"allowedPackages":       []string{"example-operator"},
 		},
 		"sign": map[string]interface{}{
 			"configMapName": "hacbs-signing-pipeline-config-redhatbeta2",
